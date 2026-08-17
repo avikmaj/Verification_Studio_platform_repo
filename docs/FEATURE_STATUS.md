@@ -115,16 +115,45 @@ the real cause.
 | UVM tree discovery + version detection | SUPPORTED | `uvm-core` identified as `2020-3.1`, generation `1800.2`, IEEE-1800.2 = true |
 | Legacy generation recognition (1.0-1.2, 2017-x) | PARTIALLY_SUPPORTED | version-string parsing implemented; only 2020.3.1 measured |
 | **UVM 2020.3.1 SystemVerilog elaboration on Verilator 5.050** | **SUPPORTED** | full `uvm_pkg.sv` + a `uvm_test` with phases/objections/`uvm_info` elaborated with **0 `%Error`** |
-| UVM 2020.3.1 executable image + runtime | NOT_VERIFIED | C++ codegen of the elaborated package exceeded the measurement window on 2 cores (>580 objects). **Not claimed as working.** |
+| **UVM 2020.3.1 executable image** | **SUPPORTED** | 2021 C++ translation units built, `MAKE_RC=0`, 21 MB binary |
+| **UVM 2020.3.1 runtime execution** | **SUPPORTED** | see the run evidence below — `RUN_RC=0`, 0 UVM_ERROR, 0 UVM_FATAL |
+| `run_test()` dispatch by name | SUPPORTED | `[RNTST] Running test hello_test...` |
+| Factory construction of a `uvm_test` | SUPPORTED | `uvm_test_top` built and reported |
+| Phasing (`run_phase`) | SUPPORTED | `[HELLO] UVM is alive` emitted from `run_phase` |
+| Objections (`raise`/`drop`) | SUPPORTED | phase ended at **10 ns**, not 0 — the objection held the phase open |
+| Report server + severity/id aggregation | SUPPORTED | `--- UVM Report Summary ---` with counts by severity *and* by id |
+| Clean shutdown via `uvm_root` | SUPPORTED | `uvm_root.svh:633: Verilog $finish`, exit code 0 |
+| UVM golden APB environment (agent stack) runtime | NOT_VERIFIED | elaborates clean; codegen not yet run. **Not claimed.** |
 | UVM 1.2 (legacy generation) | NOT_VERIFIED | not attempted |
-| UVM DPI (`uvm_re_match` etc.) | UNSUPPORTED | built with `UVM_NO_DPI`; regex-dependent features unavailable |
+| UVM DPI (`uvm_re_match` etc.) | UNSUPPORTED | built with `UVM_NO_DPI`; regex-dependent features unavailable, confirmed by `[NO_VISIT_CHECK]` at runtime |
 
-**Honest reading:** the platform locates real Accellera UVM, and Verilator
-accepts the full package through elaboration. Whether a UVM test *executes*
-correctly on this backend is `NOT_VERIFIED` here and must not be reported as
-`PASS`. The golden APB environment in `examples/golden_apb/` is the acceptance
-vehicle; run it on a machine with more cores, or on VCS/Questa/Xcelium once
-those adapters land.
+### UVM runtime evidence
+
+```
+UVM_INFO uvm_root.svh(476) @ 0: reporter [UVM/RELNOTES]
+        Accellera:1800.2:UVM:2020.3.1
+UVM_INFO @ 0: reporter [RNTST] Running test hello_test...
+UVM_INFO tb.sv(9) @ 0: uvm_test_top [HELLO] UVM is alive
+UVM_INFO uvm_report_server.svh(1009) @ 10000: [UVM/REPORT/SERVER]
+--- UVM Report Summary ---
+UVM_INFO :    4        UVM_ERROR :    0
+UVM_WARNING :    2     UVM_FATAL :    0
+- uvm_root.svh:633: Verilog $finish
+RUN_RC=0
+```
+
+**Cost:** 2021 C++ translation units, ~2 h wall clock on 2 cores, 21 MB binary.
+UVM's codegen dominates; size CI runners and containers accordingly.
+
+**Honest reading:** the UVM *runtime* is proven on this backend — factory,
+phasing, objections, report server and shutdown all work. What is **not** yet
+proven is a full agent stack under load: the golden APB environment in
+`examples/golden_apb/` elaborates clean but has not been through codegen, so
+driver/monitor/sequencer/scoreboard/covergroup execution remains
+`NOT_VERIFIED`. Two limitations stand regardless: the build uses `UVM_NO_DPI`,
+which disables component-name constraint checking (`[NO_VISIT_CHECK]`,
+`[UVM/COMP/NAMECHECK]`) and every regex-dependent feature; and UVM itself warns
+it may withdraw `UVM_NO_DPI` support.
 
 ## 5. Coverage
 

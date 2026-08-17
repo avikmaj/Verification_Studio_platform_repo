@@ -210,5 +210,8 @@ def _install_builtin_backends() -> None:
 
     register_simulator("verilator", VerilatorSimulator)
 
+    # Registers itself on import (ExecHost.REMOTE).
+    from . import remote  # noqa: F401
+
 
 _install_builtin_backends()

@@ -87,8 +87,15 @@ class Project:
     timescale: str | None = None   # default for elements declaring none
     uvm_version: str | None = None          # e.g. "1.2", "2020-3.1", or None
     uvm_home: str | None = None             # path to UVM src/ (overrides $UVM_HOME)
-    # When a UVM home resolves, compile uvm_pkg.sv ahead of user sources.
-    # Set false only if the fileset lists the UVM sources itself.
+    # True when the project file itself asked for UVM (declared `uvm_home` or
+    # `uvm_version`). An ambient $UVM_HOME must NOT opt a project in: whether a
+    # 200k-line library joins the compilation cannot depend on a shell variable
+    # that happens to be exported — that is the reproducibility hazard this
+    # model exists to prevent. $UVM_HOME only *resolves the path* for a project
+    # that already asked.
+    uses_uvm: bool = False
+    # When the project uses UVM, compile uvm_pkg.sv ahead of user sources.
+    # Set false only if a fileset lists the UVM sources itself.
     include_uvm_sources: bool = True
     filesets: list[FileSet] = field(default_factory=list)
     tests: list[TestSpec] = field(default_factory=list)
@@ -166,6 +173,7 @@ class Project:
             timescale=raw.get("timescale"),
             uvm_version=raw.get("uvm_version"),
             uvm_home=uvm_home,
+            uses_uvm=bool(raw.get("uvm_home") or raw.get("uvm_version")),
             include_uvm_sources=bool(raw.get("include_uvm_sources", True)),
             filesets=filesets,
             tests=tests,
@@ -197,7 +205,7 @@ class Project:
         seen: set[Path] = set()
 
         uvm_home = self.resolved_uvm_home()
-        if self.include_uvm_sources and uvm_home is not None:
+        if self.uses_uvm and self.include_uvm_sources and uvm_home is not None:
             pkg = uvm_home / "uvm_pkg.sv"
             if not pkg.exists():
                 raise ProjectError(
@@ -261,6 +269,13 @@ class Project:
         return out
 
     def resolved_uvm_home(self) -> Path | None:
+        """Path to the UVM src/ directory, or None if this project does not use UVM.
+
+        $UVM_HOME is consulted only as a *fallback path* for a project that
+        declared `uvm_home` or `uvm_version`. It never opts a project in.
+        """
+        if not self.uses_uvm:
+            return None
         raw = self.uvm_home or os.environ.get("UVM_HOME")
         if not raw:
             return None

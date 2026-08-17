@@ -1,0 +1,11 @@
+.git
+apps/web/node_modules
+apps/web/.next
+**/__pycache__
+**/*.egg-info
+**/build/
+**/results/
+**/obj_dir/
+third_party/
+*.tar.gz
+*.bundle
