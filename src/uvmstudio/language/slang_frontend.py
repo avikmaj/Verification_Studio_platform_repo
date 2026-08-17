@@ -610,12 +610,21 @@ class SlangFrontend(SVFrontend):
         except Exception:
             pass
         tname = self._type_name(sym)
+        # slang prints a virtual interface as the interface type itself
+        # ("apb_if#(...)"), so the printed name cannot be used to detect one.
+        # Ask the type directly; fall back to the spelling only if unavailable.
+        is_vif = False
+        try:
+            is_vif = bool(sym.type.isVirtualInterface)
+        except Exception:
+            is_vif = tname.lower().startswith("virtual ")
+
         return Variable(
             name=getattr(sym, "name", ""),
             location=ref(sym),
             type_name=tname,
             rand_kind=rand,
-            is_virtual_interface="virtual" in tname.lower(),
+            is_virtual_interface=is_vif,
         )
 
     def _lower_subroutine(self, sym, ref) -> Subroutine:
@@ -674,6 +683,16 @@ class SlangFrontend(SVFrontend):
             if k == "ClassProperty":
                 if name == "this":
                     continue
+                # A covergroup declared inside a class appears twice: as an
+                # anonymous CovergroupType, and as a property whose type is that
+                # covergroup. The property carries the user-visible name, so it
+                # is the one lowered — the anonymous type is skipped below.
+                if _kind_name(getattr(getattr(m, "type", None), "kind", "")) == "CovergroupType":
+                    cg = self._lower_covergroup(m.type, ref, ci.name)
+                    cg.name = name
+                    cg.location = ref(m)
+                    ci.covergroups.append(cg)
+                    continue
                 ci.properties.append(self._lower_variable(m, ref))
             elif k == "Subroutine":
                 if name in synthetic:
@@ -688,7 +707,10 @@ class SlangFrontend(SVFrontend):
                     )
                 )
             elif k == "CovergroupType":
-                ci.covergroups.append(self._lower_covergroup(m, ref, ci.name))
+                # Anonymous in-class covergroup type — already lowered via the
+                # named property above. Named ones (rare in classes) still land.
+                if name:
+                    ci.covergroups.append(self._lower_covergroup(m, ref, ci.name))
         return ci
 
     def _lower_covergroup(self, sym, ref, enclosing: str) -> Covergroup:

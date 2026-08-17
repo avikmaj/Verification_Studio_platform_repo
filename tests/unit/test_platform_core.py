@@ -56,7 +56,10 @@ tests:
     return tmp_path
 
 
-def test_project_loads_and_resolves_sources(tmp_path):
+def test_project_loads_and_resolves_sources(tmp_path, monkeypatch):
+    # Hermetic: a UVM_HOME in the ambient environment would otherwise prepend
+    # uvm_pkg.sv to the source list and make this test machine-dependent.
+    monkeypatch.delenv("UVM_HOME", raising=False)
     root = _write_project(tmp_path)
     p = Project.load(root)
     assert p.name == "p" and p.top == "a"

@@ -81,11 +81,44 @@ class Rule:
 
 
 class LintEngine:
-    """Runs every implemented rule over the IR."""
+    """Runs every implemented rule over the IR.
 
-    def __init__(self, disabled: set[str] | None = None) -> None:
+    Scoping matters as much as the rules. A UVM testbench compiles the entire
+    Accellera library into the same design, and linting *that* produces findings
+    the user cannot act on — `uvm_root` has a protected constructor by design,
+    `uvm_tlm_generic_payload` has unconstrained rand fields by design. Findings
+    are therefore restricted to files the project actually owns, and third-party
+    trees are excluded by path.
+    """
+
+    def __init__(
+        self,
+        disabled: set[str] | None = None,
+        *,
+        scope_paths: list[Path] | None = None,
+        exclude_paths: list[Path] | None = None,
+    ) -> None:
         self.disabled = disabled or set()
+        self.scope_paths = [Path(p).resolve() for p in (scope_paths or [])]
+        self.exclude_paths = [Path(p).resolve() for p in (exclude_paths or [])]
         self.rules: list[Rule] = _build_rules()
+
+    # -- scoping -----------------------------------------------------------
+    def in_scope(self, finding: LintFinding) -> bool:
+        """True when the finding points at code the project owns."""
+        if finding.location is None:
+            return True                      # design-level finding, always shown
+        try:
+            f = Path(finding.location.file).resolve()
+        except OSError:
+            return True
+
+        for ex in self.exclude_paths:
+            if _is_within(f, ex):
+                return False
+        if not self.scope_paths:
+            return True
+        return any(_is_within(f, s) for s in self.scope_paths)
 
     def check(self, design: Design | None) -> list[LintFinding]:
         if design is None:
@@ -106,6 +139,7 @@ class LintEngine:
                         message=f"lint rule raised an exception: {exc}",
                     )
                 )
+        out = [f for f in out if self.in_scope(f)]
         out.sort(key=lambda f: (-f.severity, f.rule))
         return out
 
@@ -234,7 +268,17 @@ def _r_no_illegal_bins(design: Design) -> Iterable[LintFinding]:
 
 
 def _r_covergroup_no_sampling(design: Design) -> Iterable[LintFinding]:
+    """Covergroup in a module scope with no sampling event.
+
+    Class-scoped covergroups are exempt: the standard UVM idiom is a
+    uvm_subscriber whose `write()` calls `cg.sample()` explicitly, which *is*
+    explicit sampling even though the declaration carries no event control.
+    Flagging it would train engineers to ignore the rule.
+    """
+    class_scoped = {id(cg) for c in design.classes.values() for cg in c.covergroups}
     for cg in design.all_covergroups():
+        if id(cg) in class_scoped:
+            continue
         if not cg.has_sampling_event and not cg.sample_args:
             yield LintFinding(
                 rule="COV003",
@@ -245,8 +289,8 @@ def _r_covergroup_no_sampling(design: Design) -> Iterable[LintFinding]:
                 ),
                 location=cg.location,
                 subject=cg.name,
-                hint="Sampling must be explicit; free-running covergroups "
-                     "produce unreproducible coverage.",
+                hint="Sampling must be explicit; a free-running covergroup in a "
+                     "module scope produces unreproducible coverage.",
             )
 
 
@@ -400,3 +444,12 @@ def _build_rules() -> list[Rule]:
         Rule("COV010", "coverage", PL,
              "cross coverage with unreachable bin combinations", None),
     ]
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """True when `path` is `root` or lives under it."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return path == root

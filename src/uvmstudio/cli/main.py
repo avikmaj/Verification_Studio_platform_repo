@@ -247,7 +247,16 @@ def cmd_lint(args) -> int:
             timescale=proj.timescale,
         )
     )
-    engine = LintEngine()
+    # Scope to what the project owns: third-party libraries (UVM above all)
+    # compile into the same design but are not the user's to fix.
+    exclude = []
+    uvm_home = proj.resolved_uvm_home()
+    if uvm_home is not None:
+        exclude.append(uvm_home)
+    engine = LintEngine(
+        scope_paths=[proj.root] if not args.all_files else None,
+        exclude_paths=exclude,
+    )
     findings = engine.check(res.design) if res.design else []
 
     if args.json:
@@ -593,6 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lint", help="run the layered lint engine")
     common(p, backend=False)
+    p.add_argument("--all-files", action="store_true",
+                   help="also lint third-party sources (UVM etc.); off by default")
     p.set_defaults(func=cmd_lint)
 
     p = sub.add_parser("build", help="build a simulation image")
