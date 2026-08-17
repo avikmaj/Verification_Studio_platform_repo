@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uvm-verification-studio"
+version = "0.3.0"
+description = "UVM Verification Studio — SystemVerilog/UVM verification platform (frontend, simulation, coverage, regression, reproducibility)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Avik Majumdar" }]
+keywords = ["systemverilog", "uvm", "eda", "verification", "simulation", "coverage"]
+
+dependencies = [
+    "pyslang>=11.0.0",   # slang 11.0 SystemVerilog frontend (MIT)
+    "z3-solver>=4.13",   # SMT backend for the constrained-random engine (MIT)
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.2"]
+
+[project.scripts]
+uvmstudio = "uvmstudio.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+uvmstudio = ["templates/*.j2", "templates/**/*.j2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_verilator: test needs a working Verilator install",
+    "requires_uvm: test needs an Accellera UVM source tree",
+    "slow: long-running test",
+]

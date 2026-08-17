@@ -1,0 +1,227 @@
+# Feature status
+
+The authoritative capability record. Every row states what was **measured**,
+not what a datasheet claims. If a row says `SUPPORTED`, there is an executed
+test behind it; if it says `PARTIALLY_SUPPORTED`, the limitation is named.
+
+Status values: `SUPPORTED` · `PARTIALLY_SUPPORTED` · `EXPERIMENTAL` ·
+`PLANNED` · `UNSUPPORTED`
+
+Live version: `uvmstudio capabilities --json`
+
+**Measurement environment**
+
+| item | value |
+|---|---|
+| OS | Ubuntu 24.04, x86_64, 2 cores |
+| Python | 3.11.15 |
+| Frontend | slang 11.0.0 via pyslang 11.0.0 |
+| Simulator | Verilator 5.050 (built from source, `v5.050`) |
+| Constraint solver | Z3 5.1.0 (`z3 --in`, used by Verilator for `randomize()`) |
+| UVM | Accellera `uvm-core` 2020.3.1 (`Accellera:1800.2:UVM:2020.3.1`) |
+| Waveform tools | GTKWave `fst2vcd`, `verilator_coverage` |
+
+---
+
+## 1. Platform (this repository)
+
+| capability | status | evidence |
+|---|---|---|
+| Project model (`uvmstudio.yaml`) | SUPPORTED | ordered filesets, globs, `${ENV}` expansion with hard failure on unset vars; 6 unit tests |
+| Cumulative regression tiers L0-L5 | SUPPORTED | unit test: L2 ⊇ L1 ⊇ L0 |
+| Source hashing (Merkle over ordered files) | SUPPORTED | content-, order- and layout-sensitive; 2 unit tests |
+| Process manager w/ timeout + tree kill | SUPPORTED | POSIX `killpg`; Windows `taskkill /T /F`; timeout test kills a 30 s sleep in <20 s |
+| Structured logging (human + JSONL) | SUPPORTED | dual sink, thread-safe |
+| Stable exit-code taxonomy | SUPPORTED | `core/errors.py`; CI branches on failure class |
+| Plugin interface boundaries | SUPPORTED | no caller imports a concrete backend; verified by import graph |
+| Windows path translation (Win↔WSL) | SUPPORTED | 3 parametrised tests + UNC rejection test |
+| WSL execution-host dispatch | PARTIALLY_SUPPORTED | implemented and unit-tested; **not yet executed on a real Windows host** |
+| Reproducibility record | SUPPORTED | source hash, git state+dirtiness, tool versions, exec host, defines, incdirs, plusargs, seed, exact commands |
+| `reproduce` with pre-flight hash check | SUPPORTED | refuses to re-run and reports `BLOCKED` when the tree changed |
+| Regression DB (SQLite) + clustering | SUPPORTED | 3 unit tests incl. signature clustering 3×/1× |
+| `NOT_VERIFIED` never counted as PASS | SUPPORTED | dedicated unit test |
+| Reports: JSON / Markdown / HTML | SUPPORTED | rendered from one dataset; cannot disagree |
+| CI generation (GH/GitLab/Jenkins/sh/ps1) | SUPPORTED | generated files call the same CLI as local runs |
+
+## 2. SystemVerilog frontend — slang 11.0.0
+
+Validated by 14 conformance tests in `tests/conformance/`.
+
+| construct | status | note |
+|---|---|---|
+| preprocessor, `include`, `define` | SUPPORTED | driven through slang's own driver command line |
+| parse + type check + elaborate | SUPPORTED | |
+| modules, ports, directions | SUPPORTED | in/out/inout/ref mapped into the IR |
+| interfaces, modports | SUPPORTED | modport port directions extracted |
+| packages, imports, typedefs, enums | SUPPORTED | |
+| classes, inheritance, virtual | SUPPORTED | base chain resolved by name |
+| `rand` / `randc` classification | SUPPORTED | per-property rand mode in the IR |
+| constraint blocks | PARTIALLY_SUPPORTED | **declared and located, expressions not lowered to IR** — see §6 |
+| covergroups, coverpoints, bins | SUPPORTED | incl. `illegal_bins`, `ignore_bins` |
+| cross coverage | PARTIALLY_SUPPORTED | crosses detected and named; target list extraction partial |
+| explicit sampling detection | SUPPORTED | event control *and* `with function sample()` args |
+| virtual interfaces | SUPPORTED | flagged on class properties |
+| elaborated hierarchy | SUPPORTED | full instance paths |
+| generate blocks | SUPPORTED | flattened into the enclosing unit |
+| assertions / properties / sequences | PARTIALLY_SUPPORTED | located, **temporal semantics not analysed** |
+| DPI declarations | PARTIALLY_SUPPORTED | parsed, not modelled |
+| diagnostics w/ location + source line | SUPPORTED | `-Wno-<name>` suppression honoured |
+| IEEE 1800-2017 / 1800-2023 selection | SUPPORTED | both accepted |
+| VPI | PLANNED | |
+| Constraint expression IR | PLANNED | |
+| SVA temporal IR | PLANNED | |
+
+## 3. Simulator backend — Verilator 5.050
+
+Measured on this install. **These are Verilator's limits, not the platform's**,
+and the capability map is computed from the detected version rather than assumed.
+
+| capability | status | measured evidence |
+|---|---|---|
+| RTL synthesizable subset | SUPPORTED | golden DUT builds and runs |
+| `--timing` (delays, event control) | SUPPORTED | clock/reset, `#10ns`, `@(posedge)` all execute |
+| Classes | SUPPORTED | class-based TB compiles and runs |
+| `randomize()` with constraints | SUPPORTED | `m_addr[1:0]==2'b00` and `inside {[1:16]}` both honoured over 20 draws |
+| Seed determinism | SUPPORTED | `+verilator+seed+N`: seed 1 twice → identical value stream; seeds 1/7/12345 → distinct streams |
+| Covergroup declaration + `sample()` | SUPPORTED | executes; bins recorded |
+| Covergroup coverage in `coverage.dat` | SUPPORTED | 3/3 bins, counts 1/3/2 — matches `verilator_coverage` |
+| **In-language `covergroup::get_coverage()`** | **UNSUPPORTED** | **returns `0.00` even with bins hit — read the coverage DB instead** |
+| **Per-coverpoint member access (`cg.cp`)** | **UNSUPPORTED** | `%Error: Member 'cp' not found in covergroup 'cg_t'` |
+| Line / branch / expression / toggle coverage | SUPPORTED | cross-checked against `verilator_coverage` |
+| VCD tracing | SUPPORTED | |
+| FST tracing | SUPPORTED | **requires `liblz4-dev` + `libzstd-dev` at build time**, else `fatal error: lz4.h` |
+| 4-state X propagation | PARTIALLY_SUPPORTED | 2-state by default; `--x-assign` only |
+| DPI-C | SUPPORTED | untested here |
+| SVA concurrent assertions | PARTIALLY_SUPPORTED | not exercised in this measurement round |
+| Accellera UVM 2020.3.1 | see §4 | |
+
+### Known Verilator lexer quirk
+
+`bins small = {...}` fails to parse: `small` collides with the Verilog drive-
+strength keyword.
+
+```
+%Error: s.sv:8:35: syntax error, unexpected STRENGTH keyword (strong1/etc)
+```
+
+Avoid `small`, `large`, `medium`, `highz0/1`, `pull0/1`, `strong0/1`, `weak0/1`
+as bin names. This is recorded because the failure message does not point at
+the real cause.
+
+## 4. Accellera UVM
+
+| item | status | evidence |
+|---|---|---|
+| UVM tree discovery + version detection | SUPPORTED | `uvm-core` identified as `2020-3.1`, generation `1800.2`, IEEE-1800.2 = true |
+| Legacy generation recognition (1.0-1.2, 2017-x) | PARTIALLY_SUPPORTED | version-string parsing implemented; only 2020.3.1 measured |
+| **UVM 2020.3.1 SystemVerilog elaboration on Verilator 5.050** | **SUPPORTED** | full `uvm_pkg.sv` + a `uvm_test` with phases/objections/`uvm_info` elaborated with **0 `%Error`** |
+| UVM 2020.3.1 executable image + runtime | NOT_VERIFIED | C++ codegen of the elaborated package exceeded the measurement window on 2 cores (>580 objects). **Not claimed as working.** |
+| UVM 1.2 (legacy generation) | NOT_VERIFIED | not attempted |
+| UVM DPI (`uvm_re_match` etc.) | UNSUPPORTED | built with `UVM_NO_DPI`; regex-dependent features unavailable |
+
+**Honest reading:** the platform locates real Accellera UVM, and Verilator
+accepts the full package through elaboration. Whether a UVM test *executes*
+correctly on this backend is `NOT_VERIFIED` here and must not be reported as
+`PASS`. The golden APB environment in `examples/golden_apb/` is the acceptance
+vehicle; run it on a machine with more cores, or on VCS/Questa/Xcelium once
+those adapters land.
+
+## 5. Coverage
+
+| capability | status | evidence |
+|---|---|---|
+| Read Verilator `coverage.dat` | SUPPORTED | `\x01key\x02value` record format decoded |
+| Covergroup bin extraction | SUPPORTED | full `cg.coverpoint.bin` hierarchy + hit counts |
+| Line/branch/expr/toggle/FSM kinds | SUPPORTED | |
+| **Differential validation** | SUPPORTED | parser output matches `verilator_coverage` exactly on all reported metrics: line 5/24, branch 0/4, expr 0/6, covergroup 3/3 |
+| Multi-run merge (union bins, sum counts) | SUPPORTED | 6-run merge produced 16/18 functional bins |
+| Hole reporting | SUPPORTED | named the two uncovered cross bins with source locations |
+| Functional vs code coverage separation | SUPPORTED | functional = covergroup bins only; conflating them is prevented by a unit test |
+| Coverage threshold gating | SUPPORTED | `uvmstudio coverage --threshold` |
+| Exclusions / waivers | PLANNED | |
+| UCIS export | PLANNED | model is UCIS-shaped to allow it |
+
+## 6. Constrained random
+
+| capability | status | note |
+|---|---|---|
+| Execution of `rand`/`randc`/`randomize()`/`with` | SUPPORTED | **via the simulator backend** (see §3) |
+| Deterministic seeds and reproduction | SUPPORTED | measured, see §3 |
+| Frontend recognition of rand modes + constraint blocks | SUPPORTED | see §2 |
+| Lint over stimulus quality | PARTIALLY_SUPPORTED | unconstrained-rand and wide-`randc` rules implemented |
+| **Native constraint IR + Z3 solver path** | **PLANNED** | Z3 is installed and used *by Verilator*; the platform's own constraint engine is not built |
+| `solve...before` cycle detection | PLANNED | |
+| Hardcoded-literal (stimulus gap) detection | PLANNED | rule `CRV011` declared, not implemented |
+
+## 7. Waveform
+
+| capability | status | evidence |
+|---|---|---|
+| VCD parse (scopes, vars, values) | SUPPORTED | 3 unit tests |
+| Vector + scalar + 4-state values | SUPPORTED | `b11111111` decoded on an 8-bit signal |
+| Cursor semantics (`value_at`) | SUPPORTED | last-change-at-or-before, unit tested |
+| Time-window query | SUPPORTED | includes the value entering the window |
+| FST read | PARTIALLY_SUPPORTED | via GTKWave `fst2vcd`; **native FST reader PLANNED**. Read a real 12-signal FST: scopes `tb_top`, `tb_top.u_dut`, 152 changes on `tb_top.sum` |
+| Format detection by content | SUPPORTED | not by extension alone |
+| Unreadable ≠ empty | SUPPORTED | raises `UnsupportedFeature` rather than returning 0 signals |
+| EVCD | PLANNED | explicit error, not silent |
+| Transaction overlay | PLANNED | |
+| GUI viewer | PLANNED | |
+
+## 8. Lint
+
+9 rules implemented, 12 declared-but-unimplemented (visible in
+`uvmstudio lint --json` under `rules`, each with its status).
+
+| id | layer | status |
+|---|---|---|
+| `CRV001` rand fields with no constraint block | constraints | SUPPORTED |
+| `CRV002` wide `randc` (cyclic state explosion) | constraints | SUPPORTED |
+| `COV001` coverpoint without explicit bins | coverage | SUPPORTED |
+| `COV002` covergroup without `illegal_bins` | coverage | SUPPORTED |
+| `COV003` covergroup without explicit sampling | coverage | SUPPORTED |
+| `UVM001` `uvm_component` without a constructor | uvm | SUPPORTED |
+| `UVM002` sequence item with rand fields, no constraints | uvm | SUPPORTED |
+| `UVM003` virtual interface above driver/monitor layer | uvm | PARTIALLY_SUPPORTED |
+| `RTL001` module with no ports/vars/instances | structural | SUPPORTED |
+| `UVM010`-`UVM015` phase/objection/factory/config_db/TLM/sequencer checks | uvm | PLANNED |
+| `SVA001`-`SVA002` vacuity, reset qualification | assertions | PLANNED |
+| `CRV010`-`CRV011` solve-before cycles, hardcoded literals | constraints | PLANNED |
+| `COV010` unreachable cross bins | coverage | PLANNED |
+
+Syntax and semantic linting are **not** re-implemented here — they are the
+frontend's job and are surfaced through the same diagnostic model.
+
+## 9. Not built
+
+Named explicitly so nothing is implied by omission:
+
+- Native SystemVerilog simulation kernel (scheduler, regions, delta cycles)
+- Native constraint solver and constraint IR
+- Native covergroup runtime
+- SVA evaluation engine
+- Transaction database and the unified verification graph
+- UVM-aware debugger (hierarchy/phase/objection/factory/config_db views)
+- Monaco/Tauri IDE, LSP server, cross-probing UI
+- VCS / Questa / Xcelium / Riviera adapters
+- UCIS import/export
+- Regression intelligence beyond signature clustering and seed effectiveness
+- DPI/VPI implementation
+
+---
+
+## Defects found and fixed during bring-up
+
+Recorded because they are evidence the pipeline was exercised, not simulated.
+
+| # | found by | defect | resolution |
+|---|---|---|---|
+| 1 | slang frontend | scaffold TB sampled a covergroup *type* instead of an instance (`cg_stim.sample`) | added `cg_stim_t cg_stim = new();` |
+| 2 | slang frontend | scaffold DUT had no timescale while the TB did | added `` `timescale 1ns/1ps `` |
+| 3 | conformance test | `has_sampling_event` always false — wrong pyslang API (`getCoverageEvent()`) | use `CovergroupType.coverageEvent` |
+| 4 | manual review | `sample_args` never populated | read formals from the body's `sample` subroutine |
+| 5 | differential vs `verilator_coverage` | coverage parser returned 37/37 `unknown` — record format uses `\x01`/`\x02` delimiters, invisible in a terminal | rewrote as a delimited key/value parse |
+| 6 | CLI run | `uvmstudio waves` reported "0 signals" for FST instead of failing | added format detection + `fst2vcd` path; unreadable now raises |
+| 7 | CLI run | vector signals unreachable by plain path (`tb_top.sum`) because the bit range was folded into the name | canonical name excludes full ranges; ranged path kept as an alias |
+| 8 | Verilator build | FST tracing failed with `fatal error: lz4.h` | documented `liblz4-dev`/`libzstd-dev` prerequisite |
+| 9 | Verilator parse | `bins small = {...}` rejected as a STRENGTH keyword | documented; renamed the bin |

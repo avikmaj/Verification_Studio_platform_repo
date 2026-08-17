@@ -1,0 +1,498 @@
+"""Verilator backend.
+
+Verilator is the platform's first `ISimulator` implementation and its reference
+oracle for differential testing. It is intentionally replaceable: everything
+Verilator-specific — argument construction, log grammar, coverage file layout —
+lives in this file and nowhere else.
+
+Capability probing, not assumption: `capabilities()` reflects what *this
+installed version* reports, so a 5.020 install and a 5.050 install do not claim
+the same feature set.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import time
+from functools import lru_cache
+from pathlib import Path
+
+from ..core.errors import SimulatorError
+from ..core.hashing import hash_sources, hash_text, short
+from ..core.logging import get_logger
+from ..core.platform import ExecContext, ExecHost, is_windows
+from ..core.process import ProcessManager
+from ..plugins.interfaces import FeatureStatus
+from .base import (
+    BuildRequest,
+    BuildResult,
+    RunRequest,
+    RunResult,
+    RunStatus,
+    Simulator,
+    WaveFormat,
+)
+
+# --- log grammar ---------------------------------------------------------
+# UVM report summary counters, e.g. "UVM_ERROR :    3"
+_UVM_COUNT_RE = re.compile(r"^\s*(UVM_(?:INFO|WARNING|ERROR|FATAL))\s*:\s*(\d+)\s*$", re.M)
+# Inline UVM messages, e.g. "UVM_ERROR tb.sv(42) @ 100: uvm_test_top [TAG] msg"
+_UVM_MSG_RE = re.compile(r"^(UVM_(?:ERROR|FATAL))\b\s*(.*)$", re.M)
+_UVM_SUMMARY_RE = re.compile(r"--- UVM Report Summary ---")
+_ASSERT_FAIL_RE = re.compile(
+    r"(%Error:.*[Aa]ssert(?:ion)? failed|Assertion failed|\[%Error\].*assert)", re.M
+)
+_VERILATOR_ERROR_RE = re.compile(r"^%Error(-[A-Z0-9_]+)?:\s*(.*)$", re.M)
+_VERILATOR_WARN_RE = re.compile(r"^%Warning(-[A-Z0-9_]+)?:\s*(.*)$", re.M)
+_FINISH_RE = re.compile(r"- (?:\S+:\d+: )?Verilog \$finish|\$finish called|- V e r i l a t i o n")
+_TIMEOUT_TOKENS = ("UVM_FATAL", "TIMEOUT", "watchdog")
+
+
+@lru_cache(maxsize=8)
+def _probe_verilator(exe: str, launcher: tuple[str, ...]) -> tuple[str, str]:
+    """Return (version_string, full --version output) for an executable.
+
+    `launcher` is the exec-host prefix (empty for native, ("wsl.exe","--") or
+    ("wsl.exe","-d","<distro>","--") when dispatching into WSL from Windows).
+    """
+    from subprocess import run
+
+    argv = list(launcher) + [exe, "--version"]
+    try:
+        out = run(argv, capture_output=True, text=True, timeout=120)
+    except Exception as exc:
+        raise SimulatorError(f"could not probe {' '.join(argv)}: {exc}") from exc
+    text = (out.stdout or out.stderr).strip()
+    m = re.search(r"Verilator\s+([0-9]+\.[0-9]+)", text)
+    return (m.group(1) if m else "unknown"), text
+
+
+class VerilatorSimulator(Simulator):
+    name = "verilator"
+
+    def __init__(
+        self,
+        executable: str | None = None,
+        jobs: int | None = None,
+        exec_host: ExecHost | None = None,
+        wsl_distro: str | None = None,
+    ) -> None:
+        self.executable = (
+            executable
+            or os.environ.get("UVMSTUDIO_VERILATOR")
+            or shutil.which("verilator")
+            or "verilator"
+        )
+        self.jobs = jobs or max(1, (os.cpu_count() or 2))
+        self.proc = ProcessManager()
+        self.log = get_logger()
+
+        # Verilator has no supported native Windows build; on Windows the
+        # backend dispatches into WSL and translates paths at the boundary.
+        self.ctx = ExecContext.detect(exec_host)
+        if wsl_distro:
+            self.ctx.wsl_distro = wsl_distro
+        if self.ctx.host is ExecHost.WSL:
+            # PATH lookup happens inside the distro, not on the Windows host.
+            self.executable = executable or os.environ.get(
+                "UVMSTUDIO_VERILATOR", "verilator"
+            )
+
+    # -- exec-host plumbing ------------------------------------------------
+    @property
+    def _launcher(self) -> tuple[str, ...]:
+        return tuple(self.ctx.wrap([])) if self.ctx.host is not ExecHost.NATIVE else ()
+
+    def _argv(self, argv: list[str]) -> list[str]:
+        return self.ctx.wrap(argv)
+
+    def _p(self, path: Path | str) -> str:
+        """Translate a host path into the execution host's namespace."""
+        return self.ctx.path(path)
+
+    # -- availability ------------------------------------------------------
+    def is_available(self) -> bool:
+        if self.ctx.host is ExecHost.WSL:
+            try:
+                _probe_verilator(self.executable, self._launcher)
+                return True
+            except SimulatorError:
+                return False
+        if is_windows():
+            # Native Windows Verilator is not a supported configuration.
+            return False
+        return (
+            shutil.which(self.executable) is not None
+            or Path(self.executable).is_file()
+        )
+
+    def version(self) -> str:
+        self.require_available()
+        return _probe_verilator(self.executable, self._launcher)[0]
+
+    def version_banner(self) -> str:
+        self.require_available()
+        return _probe_verilator(self.executable, self._launcher)[1]
+
+    def exec_host(self) -> str:
+        return self.ctx.describe()
+
+    def capabilities(self) -> dict[str, FeatureStatus]:
+        """Feature map derived from the *installed* version, not assumed.
+
+        Verilator's class/randomisation/UVM support improved substantially
+        across the 5.0x series; reporting a fixed map would be a false claim.
+        """
+        S, P, E, PL, U = (
+            FeatureStatus.SUPPORTED,
+            FeatureStatus.PARTIALLY_SUPPORTED,
+            FeatureStatus.EXPERIMENTAL,
+            FeatureStatus.PLANNED,
+            FeatureStatus.UNSUPPORTED,
+        )
+        if not self.is_available():
+            return {"backend_installed": U}
+
+        try:
+            ver = float(self.version())
+        except ValueError:
+            ver = 0.0
+
+        caps: dict[str, FeatureStatus] = {
+            "backend_installed": S,
+            "rtl_synthesizable_subset": S,
+            "timing_delays": S,          # --timing, 5.006+
+            "vcd_waves": S,
+            "fst_waves": S,
+            "line_coverage": S,
+            "toggle_coverage": S,
+            "dpi_c": S,
+            "four_state_x_prop": P,      # 2-state by default; --x-assign only
+            "classes": P,
+            "randomize": P,
+            "constraints": P,
+            "covergroups": P,
+            "sva_concurrent": P,
+            "uvm_1_2": P,
+            "uvm_ieee_1800_2": P,
+            "vpi": P,
+        }
+        # 5.03x+ materially improved class/constraint/covergroup handling and
+        # added the external SMT solver path used by randomize().
+        if ver >= 5.036:
+            caps.update({"classes": S, "randomize": P, "constraints": P,
+                         "covergroups": P, "uvm_1_2": E})
+        if ver >= 5.048:
+            caps.update({"uvm_1_2": E, "uvm_ieee_1800_2": E})
+        return caps
+
+    def solver_available(self) -> bool:
+        """Verilator delegates `randomize()` constraints to an external SMT solver."""
+        return shutil.which("z3") is not None
+
+    # -- build -------------------------------------------------------------
+    def build(self, request: BuildRequest) -> BuildResult:
+        self.require_available()
+        t0 = time.monotonic()
+        build_dir = request.build_dir
+        build_dir.mkdir(parents=True, exist_ok=True)
+        obj_dir = build_dir / "obj_dir"
+        binary = obj_dir / request.binary_name
+
+        # -- compile cache: identical inputs => reuse the image -------------
+        key = self._cache_key(request)
+        stamp = build_dir / "build_stamp.json"
+        if binary.exists() and stamp.exists():
+            try:
+                prev = json.loads(stamp.read_text())
+                if prev.get("key") == key:
+                    self.log.info("build cache hit", key=short(key), binary=str(binary))
+                    return BuildResult(
+                        ok=True,
+                        binary=binary,
+                        log=(build_dir / "build.log").read_text(errors="replace")
+                        if (build_dir / "build.log").exists()
+                        else "",
+                        duration_s=0.0,
+                        command=prev.get("command", []),
+                        backend=self.name,
+                        backend_version=self.version(),
+                        cached=True,
+                        status=RunStatus.PASS,
+                    )
+            except Exception:
+                pass
+
+        argv = self._argv(self._build_argv(request, obj_dir))
+        res = self.proc.run(
+            argv,
+            cwd=build_dir,
+            timeout_s=request.timeout_s,
+            log_path=build_dir / "build.log",
+        )
+
+        ok = res.ok and binary.exists()
+        if ok:
+            stamp.write_text(json.dumps({"key": key, "command": argv}, indent=2))
+
+        return BuildResult(
+            ok=ok,
+            binary=binary if ok else None,
+            log=res.combined(),
+            duration_s=time.monotonic() - t0,
+            command=argv,
+            backend=self.name,
+            backend_version=self.version(),
+            cached=False,
+            status=RunStatus.PASS if ok else RunStatus.BLOCKED,
+        )
+
+    def _cache_key(self, request: BuildRequest) -> str:
+        parts = list(request.cache_key_parts())
+        parts.append(f"verilator={self.version()}")
+        try:
+            parts.append("srcs=" + hash_sources(request.files))
+        except Exception:
+            pass
+        return hash_text("\n".join(parts))
+
+    def _build_argv(self, request: BuildRequest, obj_dir: Path) -> list[str]:
+        argv: list[str] = [self.executable, "--binary", "--sv"]
+        argv += ["--Mdir", self._p(obj_dir), "-o", request.binary_name]
+        argv += ["--top-module", request.top]
+        argv += ["-j", str(min(self.jobs, max(1, request.threads or self.jobs)))]
+
+        if request.timescale:
+            argv += ["--timescale", request.timescale]
+        if request.timing:
+            argv.append("--timing")
+        if request.coverage:
+            argv.append("--coverage")
+        if request.waves is WaveFormat.FST:
+            argv += ["--trace-fst", "--trace-structs"]
+        elif request.waves is WaveFormat.VCD:
+            argv += ["--trace", "--trace-structs"]
+
+        # Verilator is strict by default; these are style-level lints that would
+        # otherwise mask real errors in third-party VIP. They are *warnings*
+        # being demoted, never errors being hidden.
+        for w in (
+            "WIDTHTRUNC", "WIDTHEXPAND", "UNOPTFLAT", "DECLFILENAME",
+            "UNUSEDSIGNAL", "UNUSEDPARAM", "VARHIDDEN", "CASEINCOMPLETE",
+            "SYNCASYNCNET", "MULTIDRIVEN", "PINCONNECTEMPTY", "IMPLICITSTATIC",
+        ):
+            argv += [f"-Wno-{w}"]
+
+        for inc in request.include_dirs:
+            argv.append(f"+incdir+{self._p(inc)}")
+        for d in request.defines:
+            argv.append(f"+define+{d}")
+        if request.uvm_home is not None:
+            argv.append(f"+incdir+{self._p(request.uvm_home)}")
+
+        argv += request.extra_args
+        argv += [self._p(f) for f in request.files]
+        return argv
+
+    # -- run ---------------------------------------------------------------
+    def run(self, request: RunRequest) -> RunResult:
+        self.require_available()
+        t0 = time.monotonic()
+        run_dir = request.run_dir
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        if not request.binary.exists():
+            return RunResult(
+                status=RunStatus.BLOCKED,
+                seed=request.seed,
+                returncode=-1,
+                duration_s=0.0,
+                reasons=[f"simulation binary not found: {request.binary}"],
+                backend=self.name,
+            )
+
+        argv = [self._p(request.binary)]
+        argv.append(f"+ntb_random_seed={request.seed}")
+        argv.append(f"+verilator+seed+{request.seed}")
+        if request.uvm_testname:
+            argv.append(f"+UVM_TESTNAME={request.uvm_testname}")
+            argv.append(f"+UVM_VERBOSITY={request.verbosity}")
+        if request.waves is not WaveFormat.NONE:
+            argv.append("+DUMP_WAVES=1")
+            argv.append(f"+WAVE_FILE=waves.{request.waves.value}")
+        argv += request.plusargs
+
+        log_path = run_dir / "sim.log"
+        res = self.proc.run(
+            self._argv(argv),
+            cwd=run_dir,
+            timeout_s=request.timeout_s,
+            log_path=log_path,
+        )
+
+        wave = self._find_wave(run_dir, request.waves)
+        cov = run_dir / "coverage.dat"
+        result = self._classify(
+            text=res.combined(),
+            returncode=res.returncode,
+            timed_out=res.timed_out,
+            request=request,
+        )
+        result.duration_s = time.monotonic() - t0
+        result.log_path = log_path
+        result.wave_path = wave
+        result.coverage_path = cov if cov.exists() else None
+        result.stdout_tail = res.stdout[-4000:]
+        result.backend = self.name
+        result.backend_version = self.version()
+        result.command = argv
+        return result
+
+    @staticmethod
+    def _find_wave(run_dir: Path, fmt: WaveFormat) -> Path | None:
+        if fmt is WaveFormat.NONE:
+            return None
+        for pattern in (f"*.{fmt.value}", "*.fst", "*.vcd"):
+            hits = sorted(run_dir.glob(pattern))
+            if hits:
+                return hits[0]
+        return None
+
+    # -- result classification --------------------------------------------
+    def _classify(
+        self, *, text: str, returncode: int, timed_out: bool, request: RunRequest
+    ) -> RunResult:
+        """Turn raw simulator output into a status backed by named evidence.
+
+        Every status carries the reason(s) that produced it. A run whose output
+        contains no recognisable evidence is NOT_VERIFIED — never PASS.
+        """
+        reasons: list[str] = []
+        counters: dict[str, int] = {}
+
+        for m in _UVM_COUNT_RE.finditer(text):
+            counters[m.group(1)] = int(m.group(2))
+
+        uvm_ran = bool(_UVM_SUMMARY_RE.search(text))
+        n_err = counters.get("UVM_ERROR", 0)
+        n_fatal = counters.get("UVM_FATAL", 0)
+        inline_fatal = [m.group(0)[:200] for m in _UVM_MSG_RE.finditer(text)]
+        vl_errors = [m.group(2)[:200] for m in _VERILATOR_ERROR_RE.finditer(text)]
+        assert_fail = bool(_ASSERT_FAIL_RE.search(text))
+        finished = bool(_FINISH_RE.search(text))
+
+        counters["verilator_errors"] = len(vl_errors)
+
+        if timed_out:
+            return RunResult(
+                status=RunStatus.FAIL,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=[f"simulation timed out after {request.timeout_s}s"],
+                failure_signature=f"TIMEOUT:{request.uvm_testname or 'sim'}",
+                counters=counters,
+                timed_out=True,
+            )
+
+        # --- observed failures -------------------------------------------
+        if n_fatal:
+            reasons.append(f"UVM_FATAL count = {n_fatal}")
+        if n_err:
+            reasons.append(f"UVM_ERROR count = {n_err}")
+        if not uvm_ran and inline_fatal:
+            reasons.append(f"{len(inline_fatal)} inline UVM_ERROR/UVM_FATAL message(s)")
+        if vl_errors:
+            reasons.append(f"simulator reported {len(vl_errors)} %Error(s)")
+        if assert_fail:
+            reasons.append("assertion failure observed")
+        if returncode != 0:
+            reasons.append(f"non-zero exit code {returncode}")
+
+        failed = bool(reasons)
+
+        # --- negative tests: a detected violation IS the pass criterion ----
+        if request.expect == "FAIL":
+            if failed:
+                return RunResult(
+                    status=RunStatus.PASS,
+                    seed=request.seed,
+                    returncode=returncode,
+                    duration_s=0.0,
+                    reasons=["negative test: expected violation was DETECTED"] + reasons,
+                    counters=counters,
+                )
+            return RunResult(
+                status=RunStatus.FAIL,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=["negative test: expected violation was NOT detected"],
+                failure_signature=f"NEG_NOT_DETECTED:{request.uvm_testname or 'sim'}",
+                counters=counters,
+            )
+
+        if failed:
+            return RunResult(
+                status=RunStatus.FAIL,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=reasons,
+                failure_signature=self.failure_signature(text, vl_errors, inline_fatal),
+                counters=counters,
+            )
+
+        # --- positive evidence required for PASS --------------------------
+        if uvm_ran and n_err == 0 and n_fatal == 0 and returncode == 0:
+            return RunResult(
+                status=RunStatus.PASS,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=["UVM report summary present with 0 UVM_ERROR / 0 UVM_FATAL"],
+                counters=counters,
+            )
+        if finished and returncode == 0:
+            return RunResult(
+                status=RunStatus.PASS,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=["simulation reached $finish with exit code 0"],
+                counters=counters,
+            )
+
+        return RunResult(
+            status=RunStatus.NOT_VERIFIED,
+            seed=request.seed,
+            returncode=returncode,
+            duration_s=0.0,
+            reasons=[
+                "no pass evidence in simulator output: "
+                "no UVM report summary and no $finish observed"
+            ],
+            counters=counters,
+        )
+
+    @staticmethod
+    def failure_signature(text: str, vl_errors: list[str], uvm_msgs: list[str]) -> str:
+        """Stable key for clustering identical failures across seeds.
+
+        Numbers, hex literals, times and paths are normalised out so that the
+        same defect hit at a different time or address clusters together.
+        """
+        candidates = uvm_msgs[:1] or vl_errors[:1]
+        if not candidates:
+            tail = [l for l in text.strip().splitlines()[-20:] if l.strip()]
+            candidates = tail[-1:] if tail else ["unknown"]
+        sig = candidates[0]
+        sig = re.sub(r"0x[0-9a-fA-F]+", "<HEX>", sig)
+        sig = re.sub(r"@\s*\d+", "@<TIME>", sig)
+        sig = re.sub(r"\b\d+\b", "<N>", sig)
+        sig = re.sub(r"[/\w.-]+\.(sv|svh|v|cpp|h)\(?\d*\)?", "<FILE>", sig)
+        sig = re.sub(r"\s+", " ", sig).strip()
+        return sig[:200]

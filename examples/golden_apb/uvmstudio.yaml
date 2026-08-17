@@ -1,0 +1,58 @@
+# Golden acceptance project — real Accellera UVM APB4 environment.
+#
+# Every path is explicit. There is no implicit file discovery, because
+# implicit discovery is not reproducible.
+name: golden_apb
+top: tb_top
+language_standard: "1800-2017"
+timescale: "1ns/1ps"
+
+# Resolved from $UVM_HOME when omitted. Must point at the Accellera src/ dir.
+uvm_home: ${UVM_HOME}
+
+filesets:
+  - name: rtl
+    files:
+      - rtl/apb_if.sv
+      - rtl/apb_slave.sv
+    include_dirs:
+      - rtl
+
+  - name: tb
+    files:
+      - tb/apb_pkg.sv
+      - tb/tb_top.sv
+    include_dirs:
+      - tb
+    defines:
+      - UVM_NO_DPI
+
+default_backend: verilator
+coverage: true
+waves: on_fail          # always | on_fail | never
+build_dir: build
+results_dir: results
+
+backend_options:
+  suppress_warnings:
+    - explicit-static
+    - width-trunc
+
+tests:
+  - name: apb_smoke_test
+    tier: L0
+    seeds: 1
+    timeout_s: 600
+    tags: [smoke]
+
+  - name: apb_random_test
+    tier: L1
+    seeds: 3
+    timeout_s: 900
+    tags: [random, data-integrity]
+
+  - name: apb_error_test
+    tier: L2
+    seeds: 2
+    timeout_s: 900
+    tags: [negative, pslverr]
