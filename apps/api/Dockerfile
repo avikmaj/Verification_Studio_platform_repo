@@ -30,10 +30,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PATH=/opt/verilator/bin:$PATH \
     UVM_HOME=/opt/uvm-core/src \
-    UVMSTUDIO_WORKSPACE=/workspace
+    UVMSTUDIO_WORKSPACE=/workspace \
+    CCACHE_DIR=/tmp/ccache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv git make g++ perl \
+        ccache \
         zlib1g liblz4-1 libzstd1 libgoogle-perftools4t64 \
         gtkwave ca-certificates \
     && rm -rf /var/lib/apt/lists/*
