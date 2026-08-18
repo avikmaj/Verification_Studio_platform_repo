@@ -231,12 +231,18 @@ def _install_builtin_backends() -> None:
 
         return VerilatorSimulator(**kwargs)
 
+    def _native(**kwargs: Any) -> Simulator:
+        from ..engine.native_sim import NativeSimulator
+
+        return NativeSimulator(**kwargs)
+
     def _remote(**kwargs: Any) -> Simulator:
         from .remote import RemoteSimulator
 
         return RemoteSimulator(**kwargs)
 
     register_simulator("verilator", _verilator)
+    register_simulator("native", _native)
     register_simulator("remote", _remote)
 
 

@@ -127,13 +127,27 @@ about:
 | 31 units, PCH on (default) | 1,096 MB | 326.9 s |
 | 31 units, PCH off (`VK_PCH_I_FAST=` / `VK_PCH_I_SLOW=`) | 982 MB | 411.0 s |
 
-Dropping the PCH buys **10% memory for 26% more wall time**, and the peak is
-then a translation unit, not the header. So the cost is the generated UVM code
-itself, the default keeps the PCH, and **a 1 GB container cannot build UVM at
-any setting.** Negative result, recorded so nobody re-tries it.
+Dropping the PCH *at -Os* buys 10% memory for 26% more wall time — but that
+experiment left the 940 MB PCH still being *built* as a make prerequisite.
+Killing it entirely (stub header) and dropping to `-O0` with a 48-way split
+(91 TUs) changes the answer:
 
-Split default is 16; override with `UVMSTUDIO_COMPILE_SPLIT` or
-`backend_options.compile_split`.
+| mode | peak `cc1plus` | C++ build | sim speed |
+|---|---:|---:|---|
+| normal: `-Os`, PCH, 31 TUs | 1,096 MB | 327 s | 1x |
+| **low-memory: `-O0`, stub PCH, 91 TUs, `-j1`** | **641 MB** | 718 s | ~5x slower |
+
+**Verified end to end inside a hard 1 GB cgroup** (memory.max=1GiB, swap off,
+plus a 90 MB resident hog standing in for the API server): `uvmstudio build`
+completes (746.5 s), the binary runs UVM with 0 errors, and the golden L2
+regression passes **6/6**. This falsifies the earlier claim that "a 1 GB
+container cannot build UVM at any setting" — recorded as defect 25.
+
+The backend selects low-memory mode automatically when the detected container
+limit (cgroup v1/v2 or physical RAM) is under 2,000 MB; `UVMSTUDIO_LOW_MEMORY=1`
+forces it. Between 2,000 and 3,500 MB, normal flags run with `make -j1`.
+Split default is 16 (48 in low-memory mode); override with
+`UVMSTUDIO_COMPILE_SPLIT` or `backend_options.compile_split`.
 
 End to end through the CLI: `uvmstudio build` **305.8 s**, `STATUS: PASS`,
 then `regress --tier L2` → **6/6 PASS**.
@@ -306,6 +320,35 @@ it may withdraw `UVM_NO_DPI` support.
 Syntax and semantic linting are **not** re-implemented here — they are the
 frontend's job and are surfaced through the same diagnostic model.
 
+## 8b. Native simulation engine — EXPERIMENTAL
+
+`--backend native`: our own event-driven kernel, interpreting slang's bound
+(type-checked, width-annotated) AST. No C++ compile, no external toolchain —
+build is elaboration, run is interpretation, waves come from our own VCD
+writer and round-trip through our own VCD reader.
+
+| piece | status | evidence |
+|---|---|---|
+| four-state values (aval/bval, LRM tables) | EXPERIMENTAL | unit tests: and/or/xor tables, X-pessimistic arithmetic, ==/=== distinction, signed extension, div-by-zero→X |
+| stratified scheduler (Active/deltas/NBA) | EXPERIMENTAL | NBA swap test (`a<=b; b<=a` swaps), blocking-vs-NBA ordering test |
+| @(posedge/negedge), #delay, @(*) | EXPERIMENTAL | counter/shift-reg/FSM tests |
+| dynamic comb sensitivity | EXPERIMENTAL | reacts to any-bit change (defect: bit-0-only edge match, fixed) |
+| zero-time loop detection | EXPERIMENTAL | `always_comb a = ~a` reports, never hangs |
+| module hierarchy + port binding | EXPERIMENTAL | signal unification across instance boundary |
+| own VCD writer | EXPERIMENTAL | round-trips through our VCD reader, X/Z included |
+| **differential vs Verilator 5.050** | **4/4 designs byte-identical output** | counter+async reset, ALU ops, shift register, FSM |
+| classes / UVM / randomize / covergroups / SVA | UNSUPPORTED (raises) | attempting them names the construct and the supported subset |
+
+The subset is enumerated in `engine/interp.py::SUPPORTED`. Everything outside
+it raises `UnsupportedFeature` — the engine never silently downgrades.
+
+Engine defects found by its own bring-up (same discipline as the rest of the
+platform): pybind symbol wrappers have unstable `id()` (keyed the signal map
+on hierarchical paths); `@(*)` edge matching compared only bit 0 (missed 3→9
+on a vector); dynamic sensitivity subscribed after execution, so a self-
+triggering comb settled on wrong values instead of reporting a zero-time loop
+(feedback guard added).
+
 ## 9. Not built
 
 Named explicitly so nothing is implied by omission:
@@ -354,3 +397,4 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 22 | reviewing the image while fixing the rebase | `apps/api/Dockerfile` cloned Accellera UVM **unpinned** (`--depth 1` of the default branch). A rebuild months later would silently ship a different UVM than every `repro.json` claims — a reproducibility hole in the one component the whole platform is measured against | pinned to `ARG UVM_TAG=2020.3.1`, cloned by tag, with a `test -f uvm_pkg.sv` so a bad tag fails the build instead of producing an image that 404s at simulation time |
 | 23 | user ran the documented remote flow on Windows | `uvmstudio regress --backend remote` printed `ERROR ... Use \`uvmstudio regress --backend remote\`` — the CLI never routed the remote backend to `regress_remote()`, so it built a `RegressionRunner`, called `sim.build()` and died on `UnsupportedFeature`, telling the user to run the command they had just run. DEPLOYMENT.md documented a path the code did not have | `cmd_regress` now branches on `sim.name == "remote"`: submits the job, streams the log, prints STATUS/EVIDENCE from the remote summary. Two unit tests pin the routing and the non-PASS exit code |
 | 24 | watching the remote OOM test crawl | `POST /jobs/{id}/cancel` only cancels **queued** jobs — a RUNNING build cannot be aborted; the worker checks the cancel flag once, before starting. A memory-thrashing compile on an undersized container therefore runs until the job timeout (3600 s) | recorded as a known limitation, not silently: running-job cancellation needs the subprocess handle plumbed into the job record (kill process group on cancel). PLANNED |
+| 25 | refusing to accept my own negative result | Docs claimed "**a 1 GB container cannot build UVM at any setting**" — but the no-PCH experiment behind that claim had only emptied the `-include` flags while the 940 MB `.gch` still *built* as a make prerequisite, so nothing below ~1 GB was ever actually tested | stub the PCH out entirely (`VK_PCH_H=<empty header>`) + `-O0` + 48-way split: peak cc1plus **641 MB**, full `uvmstudio build` + 6/6 L2 regression verified inside a hard 1 GB cgroup with swap off and a 90 MB hog. Shipped as automatic low-memory mode (engages when the detected container limit < 2 GB; `UVMSTUDIO_LOW_MEMORY=1` forces). Claim corrected here rather than quietly edited |

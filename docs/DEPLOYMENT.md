@@ -153,21 +153,28 @@ backend_options:
   compile_split: 32
 ```
 
-There is a floor and it is not negotiable. Disabling the precompiled header —
-the obvious suspect, at 940 MB to build and 312 MB mapped into every unit —
-was measured, not assumed: **982 MB peak and 411 s**, against 1,096 MB and
-327 s with it. 10% less memory for 26% more time, and the peak becomes a
-translation unit rather than the header. The cost is the generated UVM code
-itself. No split and no PCH setting gets below roughly 1 GB.
+The floor moved once it was measured properly. At `-Os` the generated UVM
+code needs ~1 GB per compile whatever the split. But **low-memory mode** —
+`-O0`, the PCH stubbed out entirely, a 48-way split (91 TUs), `make -j1` —
+peaks at **641 MB**, and the platform verified the full build plus a 6/6 L2
+regression **inside a hard 1 GB cgroup** (swap off, 90 MB hog simulating the
+API server). The mode engages automatically when the detected container limit
+is under 2 GB; `UVMSTUDIO_LOW_MEMORY=1` forces it. Costs, measured: C++ build
+746 s instead of ~330 s, simulation ~5x slower — for the golden project that
+is 2.2 s per test instead of 0.4 s. **A 1 GB Railway container can therefore
+run UVM regressions**; more memory buys back compile and sim speed rather
+than unblocking anything.
 
 | build | minimum container RAM |
 |---|---:|
-| `-j 1` | **~2 GB** |
+| low-memory mode (auto below 2 GB) | **~800 MB** |
+| `-j 1`, normal `-Os` + PCH | ~2 GB |
 | `-j 2` | ~3.5 GB |
 | `-j 4` | ~6 GB |
 
-Consequence for Railway: **the 1 GB Trial container cannot build a UVM design at
-any setting.** Verified against the live deployment —
+Consequence for Railway: the 1 GB Trial container **runs UVM in low-memory
+mode** (slowly); 2 GB+ gets normal mode back. Live limit read from the
+deployment —
 
 ```
 MEMORY_LIMIT_GB : 1.000

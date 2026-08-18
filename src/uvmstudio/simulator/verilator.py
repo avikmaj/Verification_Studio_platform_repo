@@ -238,13 +238,38 @@ class VerilatorSimulator(Simulator):
             except Exception:
                 pass
 
-        argv = self._argv(self._build_argv(request, obj_dir))
+        lowmem = self.low_memory_mode()
+        argv = self._argv(self._build_argv(request, obj_dir, lowmem=lowmem))
         res = self.proc.run(
             argv,
             cwd=build_dir,
             timeout_s=request.timeout_s,
             log_path=build_dir / "build.log",
         )
+        combined_log = res.combined()
+
+        if lowmem and res.ok:
+            # Phase 2: drive make ourselves so the PCH can be stubbed out.
+            # Measured on UVM 2020.3.1 (91 TUs, -O0, stub PCH, -j1): peak
+            # cc1plus 641 MB — and the full build passes inside a hard 1 GB
+            # cgroup with swap off. -Os + real PCH cannot get there: the PCH
+            # compile alone costs 940 MB.
+            stub = obj_dir / "uvmstudio_pch_stub.h"
+            stub.write_text("// intentionally empty: low-memory stub PCH\n")
+            mk = self.proc.run(
+                self._argv([
+                    "make", "-C", self._p(obj_dir),
+                    "-f", f"V{request.top}.mk", "-j", "1",
+                    "OPT_FAST=-O0", "OPT_SLOW=-O0", "OPT_GLOBAL=-O0",
+                    "VK_PCH_I_FAST=", "VK_PCH_I_SLOW=",
+                    f"VK_PCH_H={stub.name}",
+                ]),
+                cwd=build_dir,
+                timeout_s=request.timeout_s,
+                log_path=build_dir / "build.log",
+            )
+            combined_log += "\n" + mk.combined()
+            res = mk
 
         ok = res.ok and binary.exists()
         if ok:
@@ -253,14 +278,14 @@ class VerilatorSimulator(Simulator):
         return BuildResult(
             ok=ok,
             binary=binary if ok else None,
-            log=res.combined(),
+            log=combined_log,
             duration_s=time.monotonic() - t0,
             command=argv,
             backend=self.name,
             backend_version=self.version(),
             cached=False,
             status=RunStatus.PASS if ok else RunStatus.BLOCKED,
-            reasons=[] if ok else self.classify_build_failure(res.combined()),
+            reasons=[] if ok else self.classify_build_failure(combined_log),
         )
 
     # -- compile memory ----------------------------------------------------
@@ -284,6 +309,36 @@ class VerilatorSimulator(Simulator):
     UVM_COMPILE_PEAK_RSS_MB = 1100        # tuned split, measured
     UVM_COMPILE_PCH_FLOOR_MB = 940        # PCH build, measured
     DEFAULT_COMPILE_SPLIT = 16
+
+    LOW_MEMORY_SPLIT = 48          # ~91 aggregate TUs on UVM 2020.3.1
+    LOW_MEMORY_BUDGET_MB = 2000    # below this, -Os + PCH cannot fit
+    SERIAL_BUDGET_MB = 3500        # below this, force make -j1
+
+    @staticmethod
+    def memory_budget_mb() -> int | None:
+        """Effective memory ceiling: min(cgroup limit, physical RAM)."""
+        candidates: list[int] = []
+        for path in ("/sys/fs/cgroup/memory.max",
+                     "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+            try:
+                raw = Path(path).read_text().strip()
+                if raw.isdigit():
+                    candidates.append(int(raw) // (1024 * 1024))
+            except OSError:
+                pass
+        try:
+            total = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            candidates.append(total // (1024 * 1024))
+        except (ValueError, OSError):
+            pass
+        return min(candidates) if candidates else None
+
+    def low_memory_mode(self) -> bool:
+        env = os.environ.get("UVMSTUDIO_LOW_MEMORY")
+        if env is not None:
+            return env not in ("0", "false", "")
+        budget = self.memory_budget_mb()
+        return budget is not None and budget < self.LOW_MEMORY_BUDGET_MB
 
     def compile_split(self, request: BuildRequest) -> int:
         """Number of aggregate C++ translation units to generate.
@@ -314,15 +369,14 @@ class VerilatorSimulator(Simulator):
         if _OOM_RE.search(log):
             reasons.append(
                 "compiler killed by the OOM killer - the container ran out of "
-                "memory. With the tuned translation-unit split a single cc1plus "
-                f"compiling a UVM design peaks at about "
-                f"{cls.UVM_COMPILE_PEAK_RSS_MB} MB RSS (measured), and -j N "
-                f"multiplies that. The precompiled header alone costs "
-                f"{cls.UVM_COMPILE_PCH_FLOOR_MB} MB, so no tuning fits UVM into "
-                "1 GB. Provision at least 2 GB for -j 1, 3.5 GB for -j 2. "
-                "If this build predates the split fix, raising "
-                "UVMSTUDIO_COMPILE_SPLIT also helps - fewer buckets means one "
-                "enormous compile."
+                "memory. Measured on UVM 2020.3.1: normal mode (-Os, PCH) "
+                f"peaks at {cls.UVM_COMPILE_PEAK_RSS_MB} MB per cc1plus and "
+                f"needs about 2 GB; low-memory mode (-O0, no PCH, "
+                f"{cls.LOW_MEMORY_SPLIT}-way split) peaks at 641 MB and builds "
+                "inside a hard 1 GB cgroup. Set UVMSTUDIO_LOW_MEMORY=1 to "
+                "force it - it should have engaged automatically if the "
+                "container limit was detectable. Cost: ~5x slower simulation "
+                "(-O0) and ~2.2x longer C++ compile."
             )
         if _NOSPACE_RE.search(log):
             reasons.append("build ran out of disk space")
@@ -345,14 +399,20 @@ class VerilatorSimulator(Simulator):
     def _cache_key(self, request: BuildRequest) -> str:
         parts = list(request.cache_key_parts())
         parts.append(f"verilator={self.version()}")
+        parts.append(f"lowmem={self.low_memory_mode()}")
         try:
             parts.append("srcs=" + hash_sources(request.files))
         except Exception:
             pass
         return hash_text("\n".join(parts))
 
-    def _build_argv(self, request: BuildRequest, obj_dir: Path) -> list[str]:
-        argv: list[str] = [self.executable, "--binary", "--sv"]
+    def _build_argv(self, request: BuildRequest, obj_dir: Path,
+                    lowmem: bool = False) -> list[str]:
+        if lowmem:
+            # generate only; build() runs make itself with the stub PCH
+            argv = [self.executable, "--main", "--exe", "--timing", "--sv"]
+        else:
+            argv = [self.executable, "--binary", "--sv"]
         argv += ["--Mdir", self._p(obj_dir), "-o", request.binary_name]
         argv += ["--top-module", request.top]
 
@@ -361,10 +421,16 @@ class VerilatorSimulator(Simulator):
         #   -MAKEFLAGS -j decides how many of them compile at once
         # Passing a single `-j` ties them together and makes a low-parallelism
         # build allocate the most memory. Split them.
+        budget = self.memory_budget_mb()
         make_jobs = min(self.jobs, max(1, request.threads or self.jobs))
-        argv += ["--verilate-jobs", str(make_jobs)]
-        argv += ["--build-jobs", str(self.compile_split(request))]
-        argv += ["-MAKEFLAGS", f"-j{make_jobs}"]
+        if budget is not None and budget < self.SERIAL_BUDGET_MB:
+            make_jobs = 1              # each -Os cc1plus peaks ~1.1 GB
+        split = (self.LOW_MEMORY_SPLIT if lowmem
+                 else self.compile_split(request))
+        argv += ["--verilate-jobs", str(min(self.jobs, 4))]
+        argv += ["--build-jobs", str(split)]
+        if not lowmem:
+            argv += ["-MAKEFLAGS", f"-j{make_jobs}"]
 
         if request.timescale:
             argv += ["--timescale", request.timescale]
