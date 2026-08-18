@@ -222,6 +222,8 @@ class JobQueue:
         sim = get_simulator(proj.default_backend, jobs=job.params.get("jobs", 2))
         runner = RegressionRunner(proj, sim, jobs=job.params.get("jobs", 2))
         result = runner.build()
+        for r in result.reasons:
+            job.write(f"CAUSE: {r}")
         job.write(result.log[-20000:])
         job.status = "PASS" if result.ok else "BLOCKED"
         job.result = result.to_dict()
@@ -251,6 +253,8 @@ class JobQueue:
         # sees "BLOCKED x6" and no cause — surface it.
         if outcome.build is not None and not outcome.build.ok:
             job.write("--- build failed; every run is BLOCKED ---")
+            for r in outcome.build.reasons:
+                job.write(f"CAUSE: {r}")
             job.write(outcome.build.log[-20000:])
 
         job.status = outcome.summary.get("status", "NOT_VERIFIED")

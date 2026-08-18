@@ -206,12 +206,27 @@ def get_simulator(name: str, **kwargs: Any) -> Simulator:
 
 
 def _install_builtin_backends() -> None:
-    from .verilator import VerilatorSimulator
+    """Register built-in backends LAZILY.
 
-    register_simulator("verilator", VerilatorSimulator)
+    Importing the backend modules here would be circular: this module is
+    imported at the top of each backend, so `import uvmstudio.simulator.verilator`
+    would re-enter a partially initialised module and raise ImportError. The
+    registry therefore holds thunks that import on first construction, which
+    also means an unused backend costs nothing at startup.
+    """
 
-    # Registers itself on import (ExecHost.REMOTE).
-    from . import remote  # noqa: F401
+    def _verilator(**kwargs: Any) -> Simulator:
+        from .verilator import VerilatorSimulator
+
+        return VerilatorSimulator(**kwargs)
+
+    def _remote(**kwargs: Any) -> Simulator:
+        from .remote import RemoteSimulator
+
+        return RemoteSimulator(**kwargs)
+
+    register_simulator("verilator", _verilator)
+    register_simulator("remote", _remote)
 
 
 _install_builtin_backends()

@@ -50,6 +50,18 @@ _VERILATOR_WARN_RE = re.compile(r"^%Warning(-[A-Z0-9_]+)?:\s*(.*)$", re.M)
 _FINISH_RE = re.compile(r"- (?:\S+:\d+: )?Verilog \$finish|\$finish called|- V e r i l a t i o n")
 _TIMEOUT_TOKENS = ("UVM_FATAL", "TIMEOUT", "watchdog")
 
+# --- build failure signatures --------------------------------------------
+# The kernel OOM killer surfaces through the compiler driver rather than as an
+# obvious out-of-memory message, which sends people looking for a compiler bug.
+_OOM_RE = re.compile(
+    r"Killed signal terminated program|cc1plus.*out of memory|"
+    r"virtual memory exhausted|std::bad_alloc",
+    re.I,
+)
+_NOSPACE_RE = re.compile(r"No space left on device", re.I)
+_MISSING_HDR_RE = re.compile(r"fatal error: ([\w./+-]+\.h[px]{0,2}): No such file")
+_MISSING_CMD_RE = re.compile(r"make: (\S+): No such file or directory")
+
 
 @lru_cache(maxsize=8)
 def _probe_verilator(exe: str, launcher: tuple[str, ...]) -> tuple[str, str]:
@@ -248,7 +260,50 @@ class VerilatorSimulator(Simulator):
             backend_version=self.version(),
             cached=False,
             status=RunStatus.PASS if ok else RunStatus.BLOCKED,
+            reasons=[] if ok else self.classify_build_failure(res.combined()),
         )
+
+    # -- build failure classification --------------------------------------
+    # Peak resident set of a single cc1plus compiling a UVM design. Measured on
+    # Accellera UVM 2020.3.1 plus a full APB agent stack: 4,214,248 KB.
+    UVM_COMPILE_PEAK_RSS_MB = 4115
+
+    @classmethod
+    def classify_build_failure(cls, log: str) -> list[str]:
+        """Turn a raw build log into named causes.
+
+        The OOM case matters most: the kernel kills cc1plus and g++ reports
+        "Killed signal terminated program cc1plus", which reads like a compiler
+        bug. It is a container memory limit, and the fix is a bigger container.
+        A raw compiler message is not a diagnosis.
+        """
+        reasons: list[str] = []
+
+        if _OOM_RE.search(log):
+            reasons.append(
+                "compiler killed by the OOM killer - the container ran out of "
+                f"memory. A single cc1plus compiling a UVM design peaks at about "
+                f"{cls.UVM_COMPILE_PEAK_RSS_MB} MB RSS (measured), and -j N "
+                f"multiplies that. Provision at least "
+                f"{cls.UVM_COMPILE_PEAK_RSS_MB + 1000} MB for -j 1."
+            )
+        if _NOSPACE_RE.search(log):
+            reasons.append("build ran out of disk space")
+        for m in _MISSING_HDR_RE.finditer(log):
+            reasons.append(
+                f"missing header {m.group(1)!r} - the image needs the matching "
+                f"-dev package (Verilator compiles verilated*.cpp at build time)"
+            )
+        for m in _MISSING_CMD_RE.finditer(log):
+            reasons.append(f"missing build tool {m.group(1)!r} (exit 127)")
+
+        if not reasons:
+            errs = _VERILATOR_ERROR_RE.findall(log)
+            reasons.append(
+                f"verilator reported {len(errs)} error(s)" if errs
+                else "build failed - see build.log"
+            )
+        return reasons
 
     def _cache_key(self, request: BuildRequest) -> str:
         parts = list(request.cache_key_parts())

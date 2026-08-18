@@ -35,7 +35,6 @@ from .base import (
     RunResult,
     RunStatus,
     Simulator,
-    register_simulator,
 )
 
 
@@ -240,5 +239,3 @@ class RemoteSimulator(Simulator):
             error=d.get("error"), duration_s=d.get("duration_s"),
         )
 
-
-register_simulator("remote", RemoteSimulator)

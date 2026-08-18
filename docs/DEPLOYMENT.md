@@ -124,6 +124,34 @@ Generate a token:
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
+### Memory — the number that decides whether this works at all
+
+**A single `cc1plus` compiling a UVM design peaks at ~4.1 GB RSS.** Measured:
+4,214,248 KB, on Accellera UVM 2020.3.1 plus a full APB agent stack.
+
+That is per compiler *process*, so `-j N` multiplies it. Practical floors:
+
+| build | minimum container RAM |
+|---|---:|
+| `-j 1` | **~5 GB** |
+| `-j 2` | ~9 GB |
+| `-j 4` | ~17 GB |
+
+Below that the kernel kills the compiler and Verilator reports:
+
+```
+g++: fatal error: Killed signal terminated program cc1plus
+```
+
+which reads like a compiler bug and is not one. The platform classifies this
+case explicitly — `uvmstudio build` prints `CAUSE: compiler killed by the OOM
+killer ...` with the measured figure — rather than leaving you to decode a
+compiler message.
+
+A non-UVM SystemVerilog project is nowhere near this: the scaffold project
+builds and runs 6 seeds in about 7 seconds on a small container. **UVM is the
+cost driver, and it is a memory cost before it is a CPU cost.**
+
 ### Sizing — read this before choosing a plan
 
 Verilator's codegen for Accellera UVM is **2021 C++ translation units** and took

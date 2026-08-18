@@ -295,6 +295,8 @@ def cmd_build(args) -> int:
         if not result.ok:
             print(result.log[-8000:])
         print(f"\nSTATUS: {'PASS' if result.ok else 'BLOCKED'}")
+        for r in result.reasons:
+            print(f"CAUSE: {r}")
         print(
             f"EVIDENCE: {sim.name} {result.backend_version}"
             f"{' (cache hit)' if result.cached else ''}, "
