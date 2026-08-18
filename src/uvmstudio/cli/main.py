@@ -322,6 +322,35 @@ def cmd_run(args) -> int:
 def cmd_regress(args) -> int:
     proj = _load_project(args)
     sim = _make_simulator(args)
+
+    # The remote backend is not a local simulator: the deployment owns the
+    # workspace, the build and the artefacts, so the regression is submitted
+    # as one job and its log streamed back. Routing it into RegressionRunner
+    # would call sim.build() and die on UnsupportedFeature — which is exactly
+    # the failure mode this branch exists to prevent (defect 23).
+    if sim.name == "remote":
+        status, job = sim.regress_remote(
+            proj.root.name,   # the server resolves projects by workspace dir name
+            tier=args.tier,
+            tests=args.tests or None,
+            seed=args.seed,
+            seeds=args.seeds,
+            jobs=args.jobs or 1,
+            on_log=print,
+        )
+        result = job.get("result") or {}
+        summary = result.get("summary") or {}
+        print()
+        print(f"STATUS: {status.value}")
+        print(
+            "EVIDENCE: remote job "
+            f"{job.get('id')} on {sim.exec_host()} — "
+            f"{summary.get('passed', '?')}/{summary.get('total', '?')} passed, "
+            f"{summary.get('blocked', 0)} blocked "
+            f"(regression_id={result.get('regression_id')})"
+        )
+        return 0 if status is RunStatus.PASS else EXIT_REGRESSION_NOT_PASSED
+
     runner = RegressionRunner(
         proj, sim, frontend=get_frontend(args.frontend), jobs=args.jobs or 1
     )

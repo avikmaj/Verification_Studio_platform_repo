@@ -375,3 +375,66 @@ def test_build_result_carries_reasons_through_to_dict():
     r = BuildResult(ok=False, binary=None, log="", duration_s=0.0,
                     reasons=["compiler killed by the OOM killer"])
     assert r.to_dict()["reasons"] == ["compiler killed by the OOM killer"]
+
+
+# ---------------------------------------------------------------------------
+# CLI routing for the remote backend (defect 23)
+#
+# `uvmstudio regress --backend remote` used to construct a RegressionRunner,
+# which called sim.build() and died on UnsupportedFeature — printing an error
+# that told the user to run the exact command they had just run. The CLI must
+# route the remote backend to regress_remote() instead.
+# ---------------------------------------------------------------------------
+
+def test_cli_routes_remote_backend_to_regress_remote(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from uvmstudio.cli import main as cli
+    from uvmstudio.simulator.base import RunStatus
+
+    calls = {}
+
+    class FakeRemote:
+        name = "remote"
+        def exec_host(self):
+            return "remote(https://example)"
+        def regress_remote(self, project, **kw):
+            calls["project"] = project
+            calls.update(kw)
+            return RunStatus.PASS, {"id": "j1", "result": {
+                "regression_id": 9,
+                "summary": {"passed": 4, "total": 4, "blocked": 0}}}
+
+    monkeypatch.setattr(cli, "_make_simulator", lambda a: FakeRemote())
+    monkeypatch.setattr(cli, "_load_project",
+                        lambda a: SimpleNamespace(root=tmp_path / "golden_apb"))
+
+    args = SimpleNamespace(tier="L1", tests=None, seed=7, seeds=None,
+                           jobs=2, name=None, json=False)
+    rc = cli.cmd_regress(args)
+
+    assert rc == 0
+    assert calls["project"] == "golden_apb"   # server resolves by dir name
+    assert calls["tier"] == "L1" and calls["seed"] == 7 and calls["jobs"] == 2
+
+
+def test_cli_remote_non_pass_returns_failure_exit_code(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from uvmstudio.cli import main as cli
+    from uvmstudio.simulator.base import RunStatus
+
+    class FakeRemote:
+        name = "remote"
+        def exec_host(self):
+            return "remote(https://example)"
+        def regress_remote(self, project, **kw):
+            return RunStatus.NOT_VERIFIED, {"id": "j2", "result": {
+                "regression_id": 10,
+                "summary": {"passed": 0, "total": 4, "blocked": 4}}}
+
+    monkeypatch.setattr(cli, "_make_simulator", lambda a: FakeRemote())
+    monkeypatch.setattr(cli, "_load_project",
+                        lambda a: SimpleNamespace(root=tmp_path / "p"))
+
+    args = SimpleNamespace(tier="L1", tests=None, seed=None, seeds=None,
+                           jobs=1, name=None, json=False)
+    assert cli.cmd_regress(args) == cli.EXIT_REGRESSION_NOT_PASSED
