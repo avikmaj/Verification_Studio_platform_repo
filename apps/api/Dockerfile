@@ -49,8 +49,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=verilator-build /opt/verilator /opt/verilator
 
 # Accellera UVM — fetched, never vendored into this repository.
-RUN git clone --depth 1 https://github.com/accellera-official/uvm-core.git /opt/uvm-core \
-    && rm -rf /opt/uvm-core/.git
+# Pinned. An unpinned clone means a rebuild six months from now silently gets a
+# different UVM and every recorded repro.json becomes a lie about what ran.
+ARG UVM_TAG=2020.3.1
+RUN git clone --depth 1 --branch "${UVM_TAG}" \
+        https://github.com/accellera-official/uvm-core.git /opt/uvm-core \
+    && rm -rf /opt/uvm-core/.git \
+    && test -f /opt/uvm-core/src/uvm_pkg.sv
 
 WORKDIR /app
 COPY apps/api/requirements.txt /app/apps/api/requirements.txt
