@@ -163,7 +163,13 @@ the real cause.
 | Objections (`raise`/`drop`) | SUPPORTED | phase ended at **10 ns**, not 0 — the objection held the phase open |
 | Report server + severity/id aggregation | SUPPORTED | `--- UVM Report Summary ---` with counts by severity *and* by id |
 | Clean shutdown via `uvm_root` | SUPPORTED | `uvm_root.svh:633: Verilog $finish`, exit code 0 |
-| UVM golden APB environment (agent stack) runtime | NOT_VERIFIED | elaborates clean; codegen not yet run. **Not claimed.** |
+| **UVM golden APB environment (full agent stack) runtime** | **SUPPORTED** | 6/6 PASS at tier L2. Scoreboard observed 3 writes + 5 read checks; error test detected PSLVERR on 4 out-of-range accesses. 0 UVM_ERROR, 0 UVM_FATAL |
+| Driver / monitor / sequencer / sequence handshake | SUPPORTED | transactions driven, observed and scoreboarded |
+| `uvm_subscriber` + covergroup sampling | SUPPORTED | 32/39 bins hit; read x strobe holes are the predicted ones |
+| Negative test (PSLVERR detection) | SUPPORTED | `expect: FAIL` semantics: PASS = violation detected |
+| Multi-seed determinism on a UVM env | SUPPORTED | 3 seeds of apb_random_test, all PASS |
+| FST waveform from a UVM run | SUPPORTED | 93 signals incl. `apb_pkg` and `uvm_pkg` scopes |
+| Reproducibility round-trip on a UVM run | SUPPORTED | `reproduce` re-ran seed 42: recorded=PASS, reproduced=PASS |
 | UVM 1.2 (legacy generation) | NOT_VERIFIED | not attempted |
 | UVM DPI (`uvm_re_match` etc.) | UNSUPPORTED | built with `UVM_NO_DPI`; regex-dependent features unavailable, confirmed by `[NO_VISIT_CHECK]` at runtime |
 
@@ -300,3 +306,5 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 13 | Remote regression on Railway | Verilator 5.050 silently discards a covergroup whose coverpoint references an enclosing class member (the default UVM subscriber idiom) | golden VIP rewritten to `with function sample(args)`; verified 36 bins recorded, 0 warnings |
 | 14 | Remote regression on Railway | `make: ccache: No such file or directory` / `Error 127`. Verilator bakes `OBJCACHE = ccache` into `verilated.mk` at configure time because ccache existed in the *builder* stage; the runtime stage never installed it | added `ccache` to the runtime image and set `CCACHE_DIR` |
 | 15 | Remote regression on Railway | `fstcpp_writer.cpp:18:10: fatal error: lz4.h: No such file or directory`. Runtime image had `liblz4-1`/`libzstd1` (shared libs) but not the headers | runtime image now installs the `-dev` variants. **Root cause shared with 14: the runtime image IS a build image** — Verilator ships no prebuilt runtime library, so every `verilator --binary` compiles `verilated*.cpp` in the user's build dir and needs compilers, make, perl, ccache and dev headers at *simulation* time |
+| 16 | local Verilator lint | `%Error-BADVLTPRAGMA: Unknown verilator comment`. A comment **beginning** with the token `verilator` (any case) is reserved for lint pragmas; an explanatory comment started `// Verilator 5.050 does not implement it ...` | reworded + regex guard over the file. Not the backticks or em-dash in that line — both lint fine in isolation. The first rewrite reproduced the bug, because the note *warning about the rule* also began with the token |
+| 17 | **L2 regression on the golden env** | `apb_error_test` FAILED on both seeds: *"scoreboard saw no transactions — the test proved nothing"*. **False positive in the platform's own anti-vacuity guard** — it counted `m_checks` and `m_writes` but not `m_errors_seen`, so an error-injection test (which legitimately does zero of the first two) was judged vacuous when it had in fact proved exactly what it set out to prove | guard now requires all three counters to be zero. Found by running the tier, not by review |

@@ -465,6 +465,14 @@ package apb_pkg;
       `uvm_info(get_type_name(),
                 $sformatf("scoreboard: %0d write(s), %0d read check(s), %0d error-region access(es)",
                           m_writes, m_checks, m_errors_seen), UVM_LOW)
+      // Anti-vacuity guard: a test that produced no observable evidence has
+      // proved nothing and must not be allowed to report PASS.
+      //
+      // All THREE counters matter. An error-injection test legitimately does
+      // zero writes and zero read checks — its evidence is that every
+      // out-of-range access came back with PSLVERR, counted in m_errors_seen.
+      // Omitting that term made this guard fire on apb_error_test, failing a
+      // test that had in fact proved exactly what it set out to prove.
       if (m_checks == 0 && m_writes == 0 && m_errors_seen == 0)
         `uvm_error(get_type_name(),
                    "scoreboard saw no transactions — the test proved nothing")
