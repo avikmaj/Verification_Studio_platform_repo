@@ -83,6 +83,32 @@ expands it correctly, so `railway.json` deliberately omits `startCommand` and
 lets the image decide. Config-as-code overrides the dashboard, so setting the
 command in the Railway UI will *not* rescue a bad `railway.json` — fix the file.
 
+### Editing `railway.json` from Windows PowerShell
+
+Railway's JSON parser rejects a UTF-8 **BOM**:
+
+```
+parse failure, failed to parse railway.json:
+  failed to decode json file: invalid character 'ï' looking for beginning of value
+```
+
+Windows PowerShell 5.1's `Set-Content -Encoding utf8` writes UTF-8 **with** a
+BOM — there is no `utf8NoBOM` option before PowerShell 7. Write the file
+explicitly instead:
+
+```powershell
+[System.IO.File]::WriteAllText(
+  "$PWD\railway.json", $json, (New-Object System.Text.UTF8Encoding $false))
+```
+
+Verify before committing — the first byte must be `7B` (`{`), not `EF BB BF`:
+
+```powershell
+Format-Hex railway.json | Select-Object -First 1
+```
+
+This applies to every JSON/YAML config in the repo, not just `railway.json`.
+
 Set the variables (already staged except the token):
 
 | variable | value | why |
