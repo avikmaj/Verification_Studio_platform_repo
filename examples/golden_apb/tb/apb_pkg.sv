@@ -319,9 +319,12 @@ package apb_pkg;
     // arguments rather than reaching into an enclosing class member.
     //
     // This is portable as well as clearer. A coverpoint that dereferences an
-    // enclosing class member (`coverpoint m_tr.m_dir`) is legal IEEE 1800 but
-    // Verilator 5.050 does not implement it — it silently *ignores the whole
-    // covergroup*:
+    // enclosing class member is legal IEEE 1800, but Verilator 5.050 does not
+    // implement it and silently IGNORES THE WHOLE COVERGROUP:
+    //
+    // (NB: no comment in this file may BEGIN with the word "verilator".
+    //  That spelling at the start of a comment is reserved for lint pragmas,
+    //  and an unrecognised one is a hard BADVLTPRAGMA error.)
     //
     //   %Warning-COVERIGN: Unsupported: 'covergroup' coverpoint referencing
     //     enclosing class member; ignoring covergroup '__vlAnonCG_cg_apb'
