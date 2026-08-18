@@ -84,6 +84,10 @@ and the capability map is computed from the detected version rather than assumed
 | `randomize()` with constraints | SUPPORTED | `m_addr[1:0]==2'b00` and `inside {[1:16]}` both honoured over 20 draws |
 | Seed determinism | SUPPORTED | `+verilator+seed+N`: seed 1 twice → identical value stream; seeds 1/7/12345 → distinct streams |
 | Covergroup declaration + `sample()` | SUPPORTED | executes; bins recorded |
+| Covergroup `with function sample(args)` | SUPPORTED | 5 coverpoints + 3 crosses = 36 bins recorded, 0 warnings |
+| **Coverpoint referencing an enclosing class member** | **UNSUPPORTED** | `coverpoint m_tr.m_dir` → `%Warning-COVERIGN: ... ignoring covergroup '__vlAnonCG_cg_apb'` — **the entire covergroup is dropped**. This is the default UVM subscriber idiom. |
+| **`binsof` in a cross select expression** | **UNSUPPORTED** | `ignore_bins x = binsof(cp_dir.rd)` → `%Warning-COVERIGN: Unsupported: 'binsof' in coverage select expression` |
+| **Explicit cross bins** | **UNSUPPORTED** | `%Warning-COVERIGN: Unsupported: explicit coverage cross bins` |
 | Covergroup coverage in `coverage.dat` | SUPPORTED | 3/3 bins, counts 1/3/2 — matches `verilator_coverage` |
 | **In-language `covergroup::get_coverage()`** | **UNSUPPORTED** | **returns `0.00` even with bins hit — read the coverage DB instead** |
 | **Per-coverpoint member access (`cg.cp`)** | **UNSUPPORTED** | `%Error: Member 'cp' not found in covergroup 'cg_t'` |
@@ -94,6 +98,42 @@ and the capability map is computed from the detected version rather than assumed
 | DPI-C | SUPPORTED | untested here |
 | SVA concurrent assertions | PARTIALLY_SUPPORTED | not exercised in this measurement round |
 | Accellera UVM 2020.3.1 | see §4 | |
+
+### Covergroups in UVM: the idiom that does not work
+
+The standard `uvm_subscriber` coverage pattern —
+
+```systemverilog
+apb_seq_item m_tr;
+covergroup cg_apb;
+  cp_dir: coverpoint m_tr.m_dir { ... }     // <-- enclosing class member
+endgroup
+function void write(apb_seq_item t); m_tr = t; cg_apb.sample(); endfunction
+```
+
+— is legal IEEE 1800 and is what most UVM VIP is written against. Verilator
+5.050 does not implement it and **silently discards the whole covergroup** with
+a warning. With `-Wno-fatal` off it is an error; with warnings demoted you would
+get a build that runs and reports 0 functional coverage for a reason that never
+appears in the report. That is precisely the silent degradation this platform
+forbids, so the golden VIP was rewritten rather than the warning silenced:
+
+```systemverilog
+covergroup cg_apb with function sample(apb_dir_e dir, apb_resp_e resp, ...);
+  cp_dir: coverpoint dir { ... }            // <-- explicit argument
+endgroup
+function void write(apb_seq_item t);
+  cg_apb.sample(t.m_dir, t.m_resp, t.m_addr, t.m_strb, t.m_wdata);
+endfunction
+```
+
+Measured: the argument form compiles clean and records all 5 coverpoints and
+all 3 crosses (36 bins). It is also better practice — the sampling contract is
+explicit — so this is a portability fix, not a workaround.
+
+**Consequence for existing VIP:** any UVM environment being brought up on this
+backend needs the same transformation. It is mechanical but it is not nothing,
+and it is the single biggest porting cost measured so far.
 
 ### Known Verilator lexer quirk
 
@@ -254,3 +294,7 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 7 | CLI run | vector signals unreachable by plain path (`tb_top.sum`) because the bit range was folded into the name | canonical name excludes full ranges; ranged path kept as an alias |
 | 8 | Verilator build | FST tracing failed with `fatal error: lz4.h` | documented `liblz4-dev`/`libzstd-dev` prerequisite |
 | 9 | Verilator parse | `bins small = {...}` rejected as a STRENGTH keyword | documented; renamed the bin |
+| 10 | Railway deploy | `startCommand` in `railway.json` ran without a shell → `--port '$PORT' is not a valid integer` | dropped `startCommand`; Dockerfile `CMD` is the single source of truth |
+| 11 | Railway deploy | PowerShell 5.1 `Set-Content -Encoding utf8` wrote a BOM → `failed to parse railway.json: invalid character 'ï'`, failing at SNAPSHOT_CODE with an empty build log | documented BOM-free write + `Format-Hex` check |
+| 12 | Remote regression on Railway | golden UVM env built BLOCKED with no cause shown | job runner now surfaces the build log when a build failure blocks every run — that is what exposed defect 13 |
+| 13 | Remote regression on Railway | Verilator 5.050 silently discards a covergroup whose coverpoint references an enclosing class member (the default UVM subscriber idiom) | golden VIP rewritten to `with function sample(args)`; verified 36 bins recorded, 0 warnings |

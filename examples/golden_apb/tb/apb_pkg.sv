@@ -318,15 +318,17 @@ package apb_pkg;
     // Sampling contract is explicit: the covergroup takes its values as
     // arguments rather than reaching into an enclosing class member.
     //
-    // Dereferencing an enclosing class member in a coverpoint is legal
-    // IEEE 1800, but Verilator 5.050 does not implement it and silently
-    // IGNORES THE WHOLE COVERGROUP:
+    // This is portable as well as clearer. A coverpoint that dereferences an
+    // enclosing class member (`coverpoint m_tr.m_dir`) is legal IEEE 1800 but
+    // Verilator 5.050 does not implement it — it silently *ignores the whole
+    // covergroup*:
     //
     //   %Warning-COVERIGN: Unsupported: 'covergroup' coverpoint referencing
     //     enclosing class member; ignoring covergroup '__vlAnonCG_cg_apb'
     //
-    // Losing every bin to a warning is exactly the silent degradation this
-    // platform exists to prevent, so the VIP uses the portable form.
+    // Losing every bin to a warning is exactly the kind of silent degradation
+    // this platform exists to prevent, so the VIP uses the form that works
+    // everywhere.
     covergroup cg_apb with function sample(apb_dir_e            dir,
                                            apb_resp_e           resp,
                                            bit [APB_ADDR_W-1:0] addr,
@@ -367,13 +369,17 @@ package apb_pkg;
       }
 
       // Every meaningful field interaction is crossed.
+      //
+      // NOTE: reads carry no byte strobes, so the read x strobe bins are not
+      // protocol-meaningful. The natural expression is
+      //   ignore_bins rd_strobes = binsof(cp_dir.rd);
+      // but Verilator 5.050 supports neither `binsof` in a select expression
+      // nor explicit cross bins (%Warning-COVERIGN). Rather than silence the
+      // warning, the cross is left unfiltered and the read x strobe bins are
+      // treated as expected holes at closure. Restore the ignore_bins when the
+      // backend supports it — see docs/FEATURE_STATUS.md.
       x_dir_resp : cross cp_dir, cp_resp;
       x_dir_addr : cross cp_dir, cp_addr;
-      // NOTE: reads carry no byte strobes, so read x strobe bins are not
-      // protocol-meaningful. The natural expression is an ignore_bins using
-      // binsof, but Verilator 5.050 supports neither binsof in a select
-      // expression nor explicit cross bins. Rather than silence the warning,
-      // the cross is left unfiltered and those bins are expected holes.
       x_dir_strb : cross cp_dir, cp_strb;
     endgroup
 
@@ -384,7 +390,6 @@ package apb_pkg;
 
     function void write(apb_seq_item t);
       cg_apb.sample(t.m_dir, t.m_resp, t.m_addr, t.m_strb, t.m_wdata);
-
     endfunction
 
     function void report_phase(uvm_phase phase);
