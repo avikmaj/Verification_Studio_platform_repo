@@ -69,6 +69,20 @@ Dockerfile path   : apps/api/Dockerfile
 Healthcheck path  : /health
 ```
 
+### Do not put `startCommand` in `railway.json`
+
+Railway executes a configured `startCommand` **without a shell**, so
+`--port $PORT` arrives as the literal four characters `$PORT`:
+
+```
+Error: Invalid value for '--port': '$PORT' is not a valid integer.
+```
+
+The Dockerfile's `CMD ["sh", "-c", "uvicorn ... --port ${PORT:-8000}"]` already
+expands it correctly, so `railway.json` deliberately omits `startCommand` and
+lets the image decide. Config-as-code overrides the dashboard, so setting the
+command in the Railway UI will *not* rescue a bad `railway.json` — fix the file.
+
 Set the variables (already staged except the token):
 
 | variable | value | why |
