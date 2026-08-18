@@ -36,7 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv git make g++ perl \
         ccache \
-        zlib1g liblz4-1 libzstd1 libgoogle-perftools4t64 \
+        zlib1g-dev liblz4-dev libzstd-dev libgoogle-perftools-dev \
         gtkwave ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
