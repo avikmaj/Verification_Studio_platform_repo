@@ -153,9 +153,12 @@ backend_options:
   compile_split: 32
 ```
 
-There is a floor and it is not negotiable. The precompiled header
-(`V<top>__pch.h.fast.gch`) costs **940 MB** to build and **312 MB** on disk,
-and every translation unit maps it. No split gets below roughly 1 GB.
+There is a floor and it is not negotiable. Disabling the precompiled header —
+the obvious suspect, at 940 MB to build and 312 MB mapped into every unit —
+was measured, not assumed: **982 MB peak and 411 s**, against 1,096 MB and
+327 s with it. 10% less memory for 26% more time, and the peak becomes a
+translation unit rather than the header. The cost is the generated UVM code
+itself. No split and no PCH setting gets below roughly 1 GB.
 
 | build | minimum container RAM |
 |---|---:|

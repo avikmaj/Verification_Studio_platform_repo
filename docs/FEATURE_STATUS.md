@@ -117,10 +117,22 @@ APB agent stack:
 Both binaries were run, not just linked: `apb_smoke_test` reaches `$finish`
 with `UVM_ERROR: 0`, `UVM_FATAL: 0`.
 
-The floor is the precompiled header — `V<top>__pch.h.fast.gch` costs **940 MB**
-to build and **312 MB** on disk, and every unit maps it. Splitting cannot go
-below roughly 1 GB, which is why a 1 GB container cannot build UVM at any
-setting. Default is 16; override with `UVMSTUDIO_COMPILE_SPLIT` or
+The floor is ~1 GB and it is **not** reducible. The obvious suspect was the
+precompiled header (`V<top>__pch.h.fast.gch`: 940 MB to build, 312 MB on disk,
+mapped by every unit), so the no-PCH case was measured rather than reasoned
+about:
+
+| configuration | peak `cc1plus` | C++ build |
+|---|---:|---:|
+| 31 units, PCH on (default) | 1,096 MB | 326.9 s |
+| 31 units, PCH off (`VK_PCH_I_FAST=` / `VK_PCH_I_SLOW=`) | 982 MB | 411.0 s |
+
+Dropping the PCH buys **10% memory for 26% more wall time**, and the peak is
+then a translation unit, not the header. So the cost is the generated UVM code
+itself, the default keeps the PCH, and **a 1 GB container cannot build UVM at
+any setting.** Negative result, recorded so nobody re-tries it.
+
+Split default is 16; override with `UVMSTUDIO_COMPILE_SPLIT` or
 `backend_options.compile_split`.
 
 End to end through the CLI: `uvmstudio build` **305.8 s**, `STATUS: PASS`,
