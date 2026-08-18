@@ -33,6 +33,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UVMSTUDIO_WORKSPACE=/workspace \
     CCACHE_DIR=/tmp/ccache
 
+# The runtime image is also a BUILD image: Verilator does not ship a
+# prebuilt runtime library. Every `verilator --binary` invocation compiles
+# verilated*.cpp (including FST tracing, which #includes lz4.h and zstd.h)
+# inside the user's build directory. So this stage needs compilers, make,
+# perl, ccache (baked into verilated.mk at configure time) AND the -dev
+# headers — not just the shared libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv git make g++ perl \
         ccache \
