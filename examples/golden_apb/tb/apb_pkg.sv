@@ -315,22 +315,36 @@ package apb_pkg;
   class apb_coverage extends uvm_subscriber #(apb_seq_item);
     `uvm_component_utils(apb_coverage)
 
-    apb_seq_item m_tr;
-
-    covergroup cg_apb;
+    // Sampling contract is explicit: the covergroup takes its values as
+    // arguments rather than reaching into an enclosing class member.
+    //
+    // Dereferencing an enclosing class member in a coverpoint is legal
+    // IEEE 1800, but Verilator 5.050 does not implement it and silently
+    // IGNORES THE WHOLE COVERGROUP:
+    //
+    //   %Warning-COVERIGN: Unsupported: 'covergroup' coverpoint referencing
+    //     enclosing class member; ignoring covergroup '__vlAnonCG_cg_apb'
+    //
+    // Losing every bin to a warning is exactly the silent degradation this
+    // platform exists to prevent, so the VIP uses the portable form.
+    covergroup cg_apb with function sample(apb_dir_e            dir,
+                                           apb_resp_e           resp,
+                                           bit [APB_ADDR_W-1:0] addr,
+                                           bit [APB_STRB_W-1:0] strb,
+                                           bit [APB_DATA_W-1:0] wdata);
       option.per_instance = 1;
 
-      cp_dir: coverpoint m_tr.m_dir {
+      cp_dir: coverpoint dir {
         bins rd = {APB_READ};
         bins wr = {APB_WRITE};
       }
 
-      cp_resp: coverpoint m_tr.m_resp {
+      cp_resp: coverpoint resp {
         bins okay = {APB_OKAY};
         bins err  = {APB_ERR};
       }
 
-      cp_addr: coverpoint m_tr.m_addr[9:2] {
+      cp_addr: coverpoint addr[9:2] {
         bins first_word = {8'h00};
         bins low        = {[8'h01 : 8'h1F]};
         bins mid        = {[8'h20 : 8'h3E]};
@@ -338,7 +352,7 @@ package apb_pkg;
         bins err_region = {[8'h40 : 8'h7F]};
       }
 
-      cp_strb: coverpoint m_tr.m_strb {
+      cp_strb: coverpoint strb {
         bins byte0    = {4'b0001};
         bins byte3    = {4'b1000};
         bins halfword = {4'b0011, 4'b1100};
@@ -346,7 +360,7 @@ package apb_pkg;
         bins others   = default;
       }
 
-      cp_wdata_corner: coverpoint m_tr.m_wdata {
+      cp_wdata_corner: coverpoint wdata {
         bins zero    = {32'h0000_0000};
         bins allones = {32'hFFFF_FFFF};
         bins other   = default;
@@ -355,10 +369,12 @@ package apb_pkg;
       // Every meaningful field interaction is crossed.
       x_dir_resp : cross cp_dir, cp_resp;
       x_dir_addr : cross cp_dir, cp_addr;
-      x_dir_strb : cross cp_dir, cp_strb {
-        // Reads do not carry byte strobes; those combinations are not legal.
-        ignore_bins rd_strobes = binsof(cp_dir.rd);
-      }
+      // NOTE: reads carry no byte strobes, so read x strobe bins are not
+      // protocol-meaningful. The natural expression is an ignore_bins using
+      // binsof, but Verilator 5.050 supports neither binsof in a select
+      // expression nor explicit cross bins. Rather than silence the warning,
+      // the cross is left unfiltered and those bins are expected holes.
+      x_dir_strb : cross cp_dir, cp_strb;
     endgroup
 
     function new(string name, uvm_component parent);
@@ -367,8 +383,8 @@ package apb_pkg;
     endfunction
 
     function void write(apb_seq_item t);
-      m_tr = t;
-      cg_apb.sample();
+      cg_apb.sample(t.m_dir, t.m_resp, t.m_addr, t.m_strb, t.m_wdata);
+
     endfunction
 
     function void report_phase(uvm_phase phase);
