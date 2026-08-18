@@ -457,7 +457,7 @@ package apb_pkg;
       `uvm_info(get_type_name(),
                 $sformatf("scoreboard: %0d write(s), %0d read check(s), %0d error-region access(es)",
                           m_writes, m_checks, m_errors_seen), UVM_LOW)
-      if (m_checks == 0 && m_writes == 0)
+      if (m_checks == 0 && m_writes == 0 && m_errors_seen == 0)
         `uvm_error(get_type_name(),
                    "scoreboard saw no transactions — the test proved nothing")
     endfunction
