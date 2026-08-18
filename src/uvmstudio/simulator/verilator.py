@@ -263,10 +263,42 @@ class VerilatorSimulator(Simulator):
             reasons=[] if ok else self.classify_build_failure(res.combined()),
         )
 
+    # -- compile memory ----------------------------------------------------
+    # Verilator concatenates its ~2500 generated .cpp files into a small number
+    # of aggregate translation units, and *the bucket count equals
+    # `--build-jobs`*. That is a trap: lowering -j to "save memory" produces
+    # FEWER, LARGER translation units and makes the peak worse. Splitting is
+    # therefore decoupled from make parallelism here.
+    #
+    # Measured on this container (2 cores, gcc, Accellera UVM 2020.3.1 + a full
+    # APB agent stack, -Os, no ccache), peak RSS of the largest single cc1plus:
+    #
+    #   --build-jobs 2  ->  4 buckets  ->  2620 MB   C++ build 350.5 s
+    #   --build-jobs 16 -> 31 buckets  ->  1096 MB   C++ build 326.9 s
+    #
+    # 2.4x less memory and slightly faster, so the split is not a trade-off.
+    # The floor is the precompiled header: building Vtb_top__pch.h.fast.gch
+    # alone peaks near 940 MB and every unit maps the resulting ~312 MB .gch.
+    # No amount of splitting goes below that, which is why UVM cannot build in
+    # a 1 GB container however it is tuned.
+    UVM_COMPILE_PEAK_RSS_MB = 1100        # tuned split, measured
+    UVM_COMPILE_PCH_FLOOR_MB = 940        # PCH build, measured
+    DEFAULT_COMPILE_SPLIT = 16
+
+    def compile_split(self, request: BuildRequest) -> int:
+        """Number of aggregate C++ translation units to generate.
+
+        Deliberately *not* tied to `jobs`. Splitting controls peak memory;
+        `jobs` controls how many of those units compile at once.
+        """
+        if request.compile_split is not None:
+            return max(1, request.compile_split)
+        env = os.environ.get("UVMSTUDIO_COMPILE_SPLIT")
+        if env and env.isdigit() and int(env) > 0:
+            return int(env)
+        return self.DEFAULT_COMPILE_SPLIT
+
     # -- build failure classification --------------------------------------
-    # Peak resident set of a single cc1plus compiling a UVM design. Measured on
-    # Accellera UVM 2020.3.1 plus a full APB agent stack: 4,214,248 KB.
-    UVM_COMPILE_PEAK_RSS_MB = 4115
 
     @classmethod
     def classify_build_failure(cls, log: str) -> list[str]:
@@ -282,10 +314,15 @@ class VerilatorSimulator(Simulator):
         if _OOM_RE.search(log):
             reasons.append(
                 "compiler killed by the OOM killer - the container ran out of "
-                f"memory. A single cc1plus compiling a UVM design peaks at about "
+                "memory. With the tuned translation-unit split a single cc1plus "
+                f"compiling a UVM design peaks at about "
                 f"{cls.UVM_COMPILE_PEAK_RSS_MB} MB RSS (measured), and -j N "
-                f"multiplies that. Provision at least "
-                f"{cls.UVM_COMPILE_PEAK_RSS_MB + 1000} MB for -j 1."
+                f"multiplies that. The precompiled header alone costs "
+                f"{cls.UVM_COMPILE_PCH_FLOOR_MB} MB, so no tuning fits UVM into "
+                "1 GB. Provision at least 2 GB for -j 1, 3.5 GB for -j 2. "
+                "If this build predates the split fix, raising "
+                "UVMSTUDIO_COMPILE_SPLIT also helps - fewer buckets means one "
+                "enormous compile."
             )
         if _NOSPACE_RE.search(log):
             reasons.append("build ran out of disk space")
@@ -318,7 +355,16 @@ class VerilatorSimulator(Simulator):
         argv: list[str] = [self.executable, "--binary", "--sv"]
         argv += ["--Mdir", self._p(obj_dir), "-o", request.binary_name]
         argv += ["--top-module", request.top]
-        argv += ["-j", str(min(self.jobs, max(1, request.threads or self.jobs)))]
+
+        # Two different knobs that Verilator conflates behind `-j`:
+        #   --build-jobs  decides how many C++ translation units are generated
+        #   -MAKEFLAGS -j decides how many of them compile at once
+        # Passing a single `-j` ties them together and makes a low-parallelism
+        # build allocate the most memory. Split them.
+        make_jobs = min(self.jobs, max(1, request.threads or self.jobs))
+        argv += ["--verilate-jobs", str(make_jobs)]
+        argv += ["--build-jobs", str(self.compile_split(request))]
+        argv += ["-MAKEFLAGS", f"-j{make_jobs}"]
 
         if request.timescale:
             argv += ["--timescale", request.timescale]

@@ -20,7 +20,7 @@ a rebuild, and the backend has no idea a dashboard exists.
 | half | URL | status |
 |---|---|---|
 | Frontend (Vercel) | https://uvm-verification-studio.vercel.app | deployed |
-| Backend (Railway) | project `uvm-verification-studio`, service `api` | created, awaiting a GitHub source |
+| Backend (Railway) | https://uvmstudio-api-production.up.railway.app | deployed; verilator 5.050 + UVM 2020.3.1 live, UVM builds blocked by the 1 GB memory limit |
 
 ## Frontend — Vercel
 
@@ -126,42 +126,80 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 
 ### Memory — the number that decides whether this works at all
 
-**A single `cc1plus` compiling a UVM design peaks at ~4.1 GB RSS.** Measured:
-4,214,248 KB, on Accellera UVM 2020.3.1 plus a full APB agent stack.
+Verilator concatenates its ~2,500 generated `.cpp` files into a small number of
+aggregate translation units, and **the bucket count equals `--build-jobs`**.
+That detail decides everything, and it is a trap: dropping `-j` to "save
+memory" produces *fewer, larger* translation units and makes the peak worse.
+A single `-j 1` build would put the entire UVM library in one compiler
+invocation.
 
-That is per compiler *process*, so `-j N` multiplies it. Practical floors:
+The platform therefore drives the two knobs separately — `--build-jobs` for how
+many units are generated, `-MAKEFLAGS -jN` for how many compile at once — and
+verifies the second actually caps concurrency.
+
+Measured on 2 cores, gcc, `-Os`, no ccache, Accellera UVM 2020.3.1 plus a full
+APB agent stack. Peak RSS of the largest single `cc1plus`:
+
+| `--build-jobs` | translation units | peak `cc1plus` | C++ build |
+|---:|---:|---:|---:|
+| 2 (tied to `-j`, the old behaviour) | 4 | **2,620 MB** | 350.5 s |
+| 16 (current default) | 31 | **1,096 MB** | 326.9 s |
+
+**2.4× less memory and 7% faster** — so this is not a trade-off, and the split
+is on by default. Override with `UVMSTUDIO_COMPILE_SPLIT`, or per project:
+
+```yaml
+backend_options:
+  compile_split: 32
+```
+
+There is a floor and it is not negotiable. The precompiled header
+(`V<top>__pch.h.fast.gch`) costs **940 MB** to build and **312 MB** on disk,
+and every translation unit maps it. No split gets below roughly 1 GB.
 
 | build | minimum container RAM |
 |---|---:|
-| `-j 1` | **~5 GB** |
-| `-j 2` | ~9 GB |
-| `-j 4` | ~17 GB |
+| `-j 1` | **~2 GB** |
+| `-j 2` | ~3.5 GB |
+| `-j 4` | ~6 GB |
 
-Below that the kernel kills the compiler and Verilator reports:
+Consequence for Railway: **the 1 GB Trial container cannot build a UVM design at
+any setting.** Verified against the live deployment —
+
+```
+MEMORY_LIMIT_GB : 1.000
+MEMORY_USAGE_GB : 0.085   (idle)
+CPU_LIMIT       : 2
+```
+
+Below the floor the kernel kills the compiler and Verilator reports:
 
 ```
 g++: fatal error: Killed signal terminated program cc1plus
 ```
 
-which reads like a compiler bug and is not one. The platform classifies this
-case explicitly — `uvmstudio build` prints `CAUSE: compiler killed by the OOM
-killer ...` with the measured figure — rather than leaving you to decode a
-compiler message.
+which reads like a compiler bug and is not one. `uvmstudio build` classifies
+this case explicitly and prints `CAUSE: compiler killed by the OOM killer ...`
+with the measured figures rather than leaving you to decode it.
 
-A non-UVM SystemVerilog project is nowhere near this: the scaffold project
-builds and runs 6 seeds in about 7 seconds on a small container. **UVM is the
-cost driver, and it is a memory cost before it is a CPU cost.**
+A non-UVM SystemVerilog project is nowhere near any of this — the scaffold
+project builds and runs 6 seeds in about 7 seconds on a small container. **UVM
+is the cost driver, and it is a memory cost before it is a CPU cost.**
 
 ### Sizing — read this before choosing a plan
 
-Verilator's codegen for Accellera UVM is **2021 C++ translation units** and took
-~2 hours on 2 cores in development, producing a 21 MB binary. Consequences:
+Verilator's codegen for Accellera UVM is **2,506 generated C++ files**,
+concatenated into 31 translation units. Measured end to end on 2 cores:
+`uvmstudio build` completes in **305.8 s** and produces a 31 MB `simv`.
+Consequences:
 
 - The Docker build itself (Verilator from source) is long; it is the first layer
   so it caches, but the first build is slow.
-- A **UVM** regression on a small container will be dominated by C++ compilation,
-  not simulation. Budget CPU accordingly, or keep the built image warm by
-  persisting `build/` on a volume.
+- A **UVM** regression on a small container is dominated by C++ compilation,
+  not simulation: ~5 minutes to build, ~0.4 s to run a test. Keep the built
+  image warm by persisting `build/` on a volume — the build cache is keyed on
+  source content, tool version and flags, so an unchanged project skips the
+  compile entirely.
 - A **non-UVM** SystemVerilog project builds in seconds — the golden `demo`-style
   project compiles and runs 6 seeds in about 7 seconds.
 

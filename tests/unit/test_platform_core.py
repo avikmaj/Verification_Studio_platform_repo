@@ -295,3 +295,83 @@ def test_failure_signatures_cluster(tmp_path):
     db.finish_regression(rid)
     clusters = {c["signature"]: c["occurrences"] for c in db.clusters()}
     assert clusters == {"SAME SIG": 3, "OTHER SIG": 1}
+
+
+# ---------------------------------------------------------------------------
+# Verilator compile-memory split
+#
+# Verilator concatenates its generated .cpp files into `--build-jobs` buckets,
+# so that flag decides peak compiler memory while make's -j decides how many
+# compiles run at once. Tying them together (a single `-j`) means a
+# low-parallelism build produces the largest possible translation unit — the
+# exact opposite of what an operator on a small container intends. Measured on
+# UVM 2020.3.1 + a full APB agent stack: 4 buckets -> 2620 MB peak cc1plus,
+# 31 buckets -> 1096 MB, and the 31-bucket build was also 7% faster.
+# These tests exist so the two knobs are never re-merged.
+# ---------------------------------------------------------------------------
+
+def _argv_for(jobs: int, split=None, tmp_path=None):
+    from uvmstudio.simulator.base import BuildRequest
+    from uvmstudio.simulator.verilator import VerilatorSimulator
+
+    sim = VerilatorSimulator(executable="verilator", jobs=jobs)
+    req = BuildRequest(
+        files=[Path("a.sv")], top="tb_top",
+        build_dir=Path(tmp_path or "/tmp/x"), threads=jobs,
+        compile_split=split,
+    )
+    return sim._build_argv(req, Path(tmp_path or "/tmp/x") / "obj_dir")
+
+
+def test_translation_unit_split_is_decoupled_from_make_parallelism(tmp_path):
+    argv = _argv_for(jobs=2, tmp_path=tmp_path)
+    assert "--build-jobs" in argv
+    build_jobs = int(argv[argv.index("--build-jobs") + 1])
+    makeflags = argv[argv.index("-MAKEFLAGS") + 1]
+
+    # The split must NOT collapse to the job count: that is the memory trap.
+    assert build_jobs > 2, argv
+    assert makeflags == "-j2", argv
+
+
+def test_make_parallelism_follows_the_requested_job_count(tmp_path):
+    for jobs in (1, 2, 4):
+        argv = _argv_for(jobs=jobs, tmp_path=tmp_path)
+        assert argv[argv.index("-MAKEFLAGS") + 1] == f"-j{jobs}"
+        # ...while the split stays high regardless of parallelism.
+        assert int(argv[argv.index("--build-jobs") + 1]) >= 16
+
+
+def test_explicit_compile_split_overrides_the_default(tmp_path):
+    argv = _argv_for(jobs=2, split=48, tmp_path=tmp_path)
+    assert argv[argv.index("--build-jobs") + 1] == "48"
+
+
+def test_compile_split_is_part_of_the_build_cache_key(tmp_path):
+    from uvmstudio.simulator.base import BuildRequest
+
+    def key(split):
+        return BuildRequest(files=[Path("a.sv")], top="t",
+                            build_dir=tmp_path, compile_split=split
+                            ).cache_key_parts()
+
+    # Changing the split changes the generated C++, so it must bust the cache.
+    assert key(16) != key(32)
+
+
+def test_oom_reason_names_the_cause_and_a_number():
+    from uvmstudio.simulator.verilator import VerilatorSimulator
+
+    log = "g++: fatal error: Killed signal terminated program cc1plus\n"
+    reasons = VerilatorSimulator.classify_build_failure(log)
+    assert any("OOM" in r for r in reasons), reasons
+    assert any(str(VerilatorSimulator.UVM_COMPILE_PEAK_RSS_MB) in r
+               for r in reasons), reasons
+
+
+def test_build_result_carries_reasons_through_to_dict():
+    from uvmstudio.simulator.base import BuildResult
+
+    r = BuildResult(ok=False, binary=None, log="", duration_s=0.0,
+                    reasons=["compiler killed by the OOM killer"])
+    assert r.to_dict()["reasons"] == ["compiler killed by the OOM killer"]

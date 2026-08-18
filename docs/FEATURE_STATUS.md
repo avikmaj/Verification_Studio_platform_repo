@@ -99,6 +99,33 @@ and the capability map is computed from the detected version rather than assumed
 | SVA concurrent assertions | PARTIALLY_SUPPORTED | not exercised in this measurement round |
 | Accellera UVM 2020.3.1 | see §4 | |
 
+### Compile memory — measured, not assumed
+
+Verilator concatenates its 2,506 generated `.cpp` files into `--build-jobs`
+aggregate translation units. That flag, not `-j`, is what sets peak compiler
+memory — and the platform used to pass one value for both, so asking for less
+parallelism asked for a *larger* compile.
+
+Measured per process on 2 cores, gcc `-Os`, no ccache, UVM 2020.3.1 + a full
+APB agent stack:
+
+| `--build-jobs` | translation units | peak `cc1plus` | C++ build | `simv` |
+|---:|---:|---:|---:|---:|
+| 2 | 4 | 2,620 MB | 350.5 s | 30.8 MB |
+| 16 | 31 | **1,096 MB** | **326.9 s** | 31.0 MB |
+
+Both binaries were run, not just linked: `apb_smoke_test` reaches `$finish`
+with `UVM_ERROR: 0`, `UVM_FATAL: 0`.
+
+The floor is the precompiled header — `V<top>__pch.h.fast.gch` costs **940 MB**
+to build and **312 MB** on disk, and every unit maps it. Splitting cannot go
+below roughly 1 GB, which is why a 1 GB container cannot build UVM at any
+setting. Default is 16; override with `UVMSTUDIO_COMPILE_SPLIT` or
+`backend_options.compile_split`.
+
+End to end through the CLI: `uvmstudio build` **305.8 s**, `STATUS: PASS`,
+then `regress --tier L2` → **6/6 PASS**.
+
 ### Covergroups in UVM: the idiom that does not work
 
 The standard `uvm_subscriber` coverage pattern —
@@ -307,6 +334,8 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 14 | Remote regression on Railway | `make: ccache: No such file or directory` / `Error 127`. Verilator bakes `OBJCACHE = ccache` into `verilated.mk` at configure time because ccache existed in the *builder* stage; the runtime stage never installed it | added `ccache` to the runtime image and set `CCACHE_DIR` |
 | 15 | Remote regression on Railway | `fstcpp_writer.cpp:18:10: fatal error: lz4.h: No such file or directory`. Runtime image had `liblz4-1`/`libzstd1` (shared libs) but not the headers | runtime image now installs the `-dev` variants. **Root cause shared with 14: the runtime image IS a build image** — Verilator ships no prebuilt runtime library, so every `verilator --binary` compiles `verilated*.cpp` in the user's build dir and needs compilers, make, perl, ccache and dev headers at *simulation* time |
 | 16 | local Verilator lint | `%Error-BADVLTPRAGMA: Unknown verilator comment`. A comment **beginning** with the token `verilator` (any case) is reserved for lint pragmas; an explanatory comment started `// Verilator 5.050 does not implement it ...` | reworded + regex guard over the file. Not the backticks or em-dash in that line — both lint fine in isolation. The first rewrite reproduced the bug, because the note *warning about the rule* also began with the token |
-| 18 | Railway UVM regression | `g++: fatal error: Killed signal terminated program cc1plus` — OOM kill, at `-j 4` and again at `-j 1` on the PCH. Measured peak: **4,214,248 KB (~4.1 GB) for a single cc1plus** on a UVM design | not a code fix — a container memory floor. Platform now classifies OOM explicitly (`CAUSE: compiler killed by the OOM killer ...`) instead of surfacing a raw compiler message that reads like a compiler bug |
+| 18 | Railway UVM regression | `g++: fatal error: Killed signal terminated program cc1plus` — OOM kill on the 1 GB Railway container (`MEMORY_LIMIT_GB: 1.000`, confirmed from the live service metrics) | **the original 4.1 GB figure was wrong** — it was peak *total* container RSS with `-j 2` plus ccache, not one compiler. Re-measured per process: 2,620 MB. Root cause was defect 20; see there. Platform classifies OOM explicitly (`CAUSE: compiler killed by the OOM killer ...`) instead of surfacing a raw compiler message that reads like a compiler bug |
 | 19 | own smoke test of the new classifier | `import uvmstudio.simulator.verilator` raised `ImportError: partially initialized module ... circular import`. Pre-existing: `base.py` imported backends at module scope while each backend imports `base` | registry now holds lazy thunks; backends import on first construction. Also means an unused backend costs nothing at startup |
 | 17 | **L2 regression on the golden env** | `apb_error_test` FAILED on both seeds: *"scoreboard saw no transactions — the test proved nothing"*. **False positive in the platform's own anti-vacuity guard** — it counted `m_checks` and `m_writes` but not `m_errors_seen`, so an error-injection test (which legitimately does zero of the first two) was judged vacuous when it had in fact proved exactly what it set out to prove | guard now requires all three counters to be zero. Found by running the tier, not by review |
+| 20 | measuring the OOM instead of assuming it | **`--build-jobs` decides how many C++ translation units Verilator generates, and the platform passed the same value as make's `-j`.** So lowering parallelism to save memory produced *fewer, larger* compiles — the exact opposite of the intent. At `-j 2`: 4 units, peak `cc1plus` **2,620 MB**, C++ build 350.5 s | split decoupled from parallelism: `--build-jobs 16` + `-MAKEFLAGS -jN`. 31 units, peak **1,096 MB**, build 326.9 s — **2.4× less memory and 7% faster**, so it is on by default. Concurrency cap verified (`max_concurrent_cc1plus = 2`), binary verified (`simv` runs UVM, 0 errors), regression verified (6/6 PASS at L2). Locked in by 4 unit tests so the two knobs cannot be re-merged |
+| 21 | full UVM build through the CLI | `TypeError: BuildResult.__init__() got an unexpected keyword argument 'reasons'` — commit 8403f68 added the argument at the call site but not to the dataclass. **The build itself succeeded and linked `simv`; only the result object failed**, so the CLI reported a traceback for a passing build | added the `reasons` field and surfaced it in `to_dict()`. Missed by the suite because no test covered the real build path — one added. This is why that commit was never worth shipping to the user as a patch |

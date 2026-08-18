@@ -64,6 +64,12 @@ class BuildRequest:
     extra_args: list[str] = field(default_factory=list)
     uvm_home: Path | None = None
     binary_name: str = "simv"
+    # How many aggregate C++ translation units the generated model is split
+    # into. This is the single biggest lever on peak compiler memory: the
+    # generated sources are concatenated into this many buckets, so fewer
+    # buckets means one enormous cc1plus. None = let the backend choose.
+    # See VerilatorSimulator.compile_split() for the measured numbers.
+    compile_split: int | None = None
 
     def cache_key_parts(self) -> list[str]:
         return [
@@ -77,6 +83,7 @@ class BuildRequest:
             f"waves={self.waves.value}",
             f"timing={self.timing}",
             f"uvm={self.uvm_home}",
+            f"split={self.compile_split}",
             *self.extra_args,
         ]
 
@@ -93,6 +100,9 @@ class BuildResult:
     cached: bool = False
     diagnostics: Any = None
     status: RunStatus = RunStatus.NOT_VERIFIED
+    # Named causes for a failed build (OOM kill, missing header, disk full...).
+    # A raw compiler log is not a diagnosis; this is where the diagnosis goes.
+    reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +114,7 @@ class BuildResult:
             "backend_version": self.backend_version,
             "cached": self.cached,
             "status": self.status.value,
+            "reasons": list(self.reasons),
         }
 
 

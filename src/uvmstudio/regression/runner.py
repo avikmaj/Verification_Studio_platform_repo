@@ -117,6 +117,10 @@ class RegressionRunner:
             uvm_home=p.resolved_uvm_home(),
             threads=self.jobs,
             extra_args=list(p.backend_options.get("extra_build_args", [])),
+            # Peak compiler memory knob. Left unset the backend picks a
+            # measured default; a project on a memory-tight runner can raise
+            # it. See VerilatorSimulator.compile_split().
+            compile_split=p.backend_options.get("compile_split"),
         )
         self.log.info(
             "building", backend=self.sim.name, top=p.top, files=len(req.files)
