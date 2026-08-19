@@ -614,13 +614,30 @@ class VerilatorSimulator(Simulator):
             )
 
         # --- positive evidence required for PASS --------------------------
-        if uvm_ran and n_err == 0 and n_fatal == 0 and returncode == 0:
+        # Red-team RT-P-002: a UVM summary alone is not enough. A summary
+        # with no $finish means the run printed its report but never reached
+        # orderly completion — that is NOT_VERIFIED, not PASS.
+        if uvm_ran and finished and n_err == 0 and n_fatal == 0 \
+                and returncode == 0:
             return RunResult(
                 status=RunStatus.PASS,
                 seed=request.seed,
                 returncode=returncode,
                 duration_s=0.0,
-                reasons=["UVM report summary present with 0 UVM_ERROR / 0 UVM_FATAL"],
+                reasons=["UVM report summary present with 0 UVM_ERROR / "
+                         "0 UVM_FATAL and $finish reached"],
+                counters=counters,
+            )
+        if uvm_ran and not finished and n_err == 0 and n_fatal == 0 \
+                and returncode == 0:
+            return RunResult(
+                status=RunStatus.NOT_VERIFIED,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=["UVM summary is clean but $finish was never "
+                         "observed - the run did not complete in an orderly "
+                         "way, so the summary proves nothing (RT-P-002)"],
                 counters=counters,
             )
         if finished and returncode == 0:

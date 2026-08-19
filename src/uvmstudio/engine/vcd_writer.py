@@ -29,6 +29,8 @@ class VCDWriter:
         self.path = Path(path)
         self._f = open(self.path, "w")
         self._ids: dict[int, str] = {}       # signal key -> identifier
+        self._n_ids = 0
+        self._scope_stack: list[str] = []
         self._last: dict[int, str] = {}      # identifier -> last emitted value
         self._time = -1
         self._header_done = False
@@ -42,9 +44,37 @@ class VCDWriter:
     def end_scope(self) -> None:
         self._f.write("$upscope $end\n")
 
+    def enter_path(self, path: str) -> None:
+        """Move the scope stack to a dotted hierarchical path, emitting only
+        the transitions. Re-opening every path from the root duplicated
+        scopes (RT-P-005)."""
+        parts = path.split(".")
+        common = 0
+        while (common < len(parts) and common < len(self._scope_stack)
+               and self._scope_stack[common] == parts[common]):
+            common += 1
+        for _ in range(len(self._scope_stack) - common):
+            self.end_scope()
+            self._scope_stack.pop()
+        for part in parts[common:]:
+            self.begin_scope(part)
+            self._scope_stack.append(part)
+
+    def close_scopes(self) -> None:
+        while self._scope_stack:
+            self.end_scope()
+            self._scope_stack.pop()
+
     def add_signal(self, key: int, name: str, width: int) -> None:
-        ident = _ident(len(self._ids))
-        self._ids[key] = ident
+        # A signal aliased across the hierarchy (port unification) keeps ONE
+        # identifier and gets a second $var name — the VCD aliasing model.
+        # Allocating a fresh ident per call collided identifiers instead
+        # (red-team RT-P-005, caught by dumping a hierarchical design).
+        ident = self._ids.get(key)
+        if ident is None:
+            ident = _ident(self._n_ids)
+            self._n_ids += 1
+            self._ids[key] = ident
         ref = name if width == 1 else f"{name} [{width - 1}:0]"
         self._f.write(f"$var wire {width} {ident} {ref} $end\n")
 

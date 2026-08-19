@@ -334,3 +334,31 @@ def test_differential_vs_verilator(name, tmp_path):
         f"native and Verilator disagree on {name}:\n"
         f"  native   : {native!r}\n  verilator: {reference!r}"
     )
+
+
+def test_vcd_hierarchical_alias_round_trip(tmp_path):
+    """RT-P-005 regression: port-unified signals must share one identifier
+    and hierarchical scopes must nest, not duplicate. The original flat
+    round-trip test was blind to both."""
+    w = VCDWriter(tmp_path / "h.vcd")
+    w.enter_path("tb")
+    w.add_signal(1, "clk", 1)
+    w.add_signal(2, "q", 4)
+    w.enter_path("tb.dut")
+    w.add_signal(1, "clk", 1)      # aliased across the boundary
+    w.add_signal(2, "q", 4)
+    w.close_scopes()
+    w.end_definitions()
+    w.change(1, FourState.from_int(0, 1), 0)
+    w.change(2, FourState.from_int(3, 4), 0)
+    w.change(2, FourState.from_int(9, 4), 10)
+    w.close(20)
+
+    db = VCDReader().open(tmp_path / "h.vcd")
+    paths = {s.path for s in db.signals.values()}
+    assert "tb.dut.q" in paths or "tb.q" in paths
+    q_path = [s.path for s in db.signals.values() if s.name == "q"][0]
+    assert db.value_at(q_path, 5) == "0011"
+    assert db.value_at(q_path, 15) == "1001"
+    text = (tmp_path / "h.vcd").read_text()
+    assert text.count("$scope module tb $end") == 1   # no duplicate root

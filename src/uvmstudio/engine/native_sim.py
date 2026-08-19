@@ -159,12 +159,10 @@ class NativeSimulator(Simulator):
         if request.waves is not WaveFormat.NONE:
             writer = VCDWriter(request.run_dir / "waves.vcd")
             for path, sigs in interp.scopes:
-                for part in path.split("."):
-                    writer.begin_scope(part)
+                writer.enter_path(path)
                 for s in sigs:
                     writer.add_signal(s.key, s.name.rsplit(".", 1)[-1], s.width)
-                for _ in path.split("."):
-                    writer.end_scope()
+            writer.close_scopes()
             writer.end_definitions()
             for s in kernel.signals:
                 writer.change(s.key, s.value, 0)

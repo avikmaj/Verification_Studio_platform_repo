@@ -379,7 +379,13 @@ package ecpri_pkg;
                                              bit [7:0]  seq_hi,
                                              bit [3:0]  version);
       cp_msg: coverpoint msg_type {
-        bins t[] = {[0:7]};
+        // COV-001 requires every eCPRI type as its OWN bin. The array form
+        // `bins t[] = {[0:7]}` silently collapsed into one aggregate bin
+        // under this simulator (red-team RT-P-003), which would let a
+        // single msg_type value satisfy "100%". Explicit bins make that
+        // model degradation impossible.
+        bins t0 = {0}; bins t1 = {1}; bins t2 = {2}; bins t3 = {3};
+        bins t4 = {4}; bins t5 = {5}; bins t6 = {6}; bins t7 = {7};
       }
       cp_concat: coverpoint concat {
         bins clear = {1'b0};
