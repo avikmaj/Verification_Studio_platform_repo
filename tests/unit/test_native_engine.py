@@ -179,12 +179,19 @@ endmodule""")
 
 
 def test_unsupported_construct_raises_not_downgrades():
+    # Classes joined the subset in N3, so the sentinel construct moved to
+    # fork/join — still honestly outside the supported set.
     from uvmstudio.core.errors import UnsupportedFeature
     with pytest.raises(UnsupportedFeature):
         _sim("""
 module tb;
-  class c_cls; int x; endclass   // classes are outside the N1 subset
-  initial $finish;
+  initial begin
+    fork
+      #1;
+      #2;
+    join
+    $finish;
+  end
 endmodule""")
 
 

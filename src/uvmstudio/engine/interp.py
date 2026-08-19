@@ -39,7 +39,8 @@ SUPPORTED = (
     "unary/ternary operators; bit and part selects; concatenation; "
     "$display/$write/$error/$fatal/$finish/$time; concurrent assert/cover "
     "property with @(edge), disable iff, |->, |=>, fixed ##N sequences, "
-    "$rose/$fell/$stable/$changed/$past/$sampled"
+    "$rose/$fell/$stable/$changed/$past/$sampled; classes with properties, "
+    "function methods, new(), this, null, reference-semantics handles"
 )
 
 
@@ -54,6 +55,32 @@ def _sv_to_fs(svint: Any, width: int, signed: bool) -> FourState:
     return FourState.from_svint_str(str(svint), width, signed)
 
 
+class NativeObject:
+    """A class instance: named four-state properties, reference semantics."""
+
+    __slots__ = ("cls_name", "props")
+
+    def __init__(self, cls_name: str, props: dict[str, FourState]) -> None:
+        self.cls_name = cls_name
+        self.props = props
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"<{self.cls_name} object at {id(self):#x}>"
+
+
+class _Return(Exception):
+    """Non-local exit for `return` inside subroutine bodies."""
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+_CLASS_BUILTINS = frozenset({
+    "randomize", "pre_randomize", "post_randomize", "get_randstate",
+    "set_randstate", "srandom", "rand_mode", "constraint_mode",
+})
+
+
 class Interp:
     def __init__(self, compilation: Any, kernel: Kernel | None = None) -> None:
         self.comp = compilation
@@ -63,6 +90,9 @@ class Interp:
         self._driven: set[str] = set()
         self._inited_locals: set[str] = set()
         self.sva_prev: dict[int, Any] | None = None
+        # class support (engine N3)
+        self.handles: dict[str, Any] = {}     # handle var path -> obj|None
+        self.frames: list[tuple[dict[str, Any], Any]] = []  # (locals, this)
 
     # ==================================================================
     # elaboration
@@ -86,6 +116,12 @@ class Interp:
         for m in members:
             kind = str(m.kind).split(".")[-1]
             if kind in ("Variable", "Net"):
+                if bool(getattr(m.type, "isClass", False)):
+                    self.handles[_key(m)] = None
+                    init = getattr(m, "initializer", None)
+                    if init is not None:
+                        processes.append((("var_init", m, init), path))
+                    continue
                 sig = self._make_signal(m, path)
                 local_signals.append(sig)
                 init = getattr(m, "initializer", None)
@@ -101,6 +137,7 @@ class Interp:
                 pending_label = m.name or pending_label
             elif kind in ("Port", "TypeAlias", "TransparentMember",
                           "TypeParameter", "Genvar", "Property", "Sequence",
+                          "ClassType",
                           "WildcardImport", "ExplicitImport"):
                 pass
             elif kind == "ContinuousAssign":
@@ -194,6 +231,13 @@ class Interp:
         kind = spec[0]
         if kind == "var_init":
             _, sym, init = spec
+            if _key(sym) in self.handles:
+                def gen_hi(k2=_key(sym), init=init):
+                    self.handles[k2] = self.eval(init)
+                    return
+                    yield  # pragma: no cover
+                self.kernel.spawn(gen_hi(), f"{path}.init.{sym.name}")
+                return
             sig = self.sigmap[_key(sym)]
 
             def gen_vi(sig=sig, init=init):
@@ -316,6 +360,11 @@ class Interp:
                 yield from self.exec_stmt(s)
             return
         if k == "Block":
+            bk = str(getattr(stmt, "blockKind", "Sequential")).split(".")[-1]
+            if bk not in ("Sequential",):
+                # fork/join executed sequentially would be a silent semantic
+                # downgrade — exactly what this engine promises never to do
+                raise _u(f"parallel block ({bk})")
             yield from self.exec_stmt(stmt.body)
             return
         if k == "ExpressionStatement":
@@ -351,16 +400,39 @@ class Interp:
         if k == "VariableDeclaration":
             sym = stmt.symbol
             k2 = _key(sym)
+            init = getattr(sym, "initializer", None)
+            if self.frames:
+                # inside a subroutine: true frame-local storage
+                locals_, _this = self.frames[-1]
+                if bool(getattr(sym.type, "isClass", False)):
+                    locals_[k2] = self.eval(init) if init is not None else None
+                else:
+                    w = int(sym.type.bitWidth)
+                    sg = bool(getattr(sym.type, "isSigned", False))
+                    locals_[k2] = (self.eval(init).resize(w, sg)
+                                   if init is not None
+                                   else FourState.all_x(w, sg))
+                return
+            if bool(getattr(sym.type, "isClass", False)):
+                if k2 not in self.handles:
+                    self.handles[k2] = None
+                if k2 not in self._inited_locals:
+                    self._inited_locals.add(k2)
+                    if init is not None:
+                        self.handles[k2] = self.eval(init)
+                return
             if k2 not in self.sigmap:
                 self.sigmap[k2] = self.kernel.signal(
                     sym.name, int(sym.type.bitWidth),
                     bool(getattr(sym.type, "isSigned", False)))
             if k2 not in self._inited_locals:
                 self._inited_locals.add(k2)
-                init = getattr(sym, "initializer", None)
                 if init is not None:
                     self.sigmap[k2].write(self.eval(init))
             return
+        if k == "Return":
+            val = self.eval(stmt.expr) if stmt.expr is not None else None
+            raise _Return(val)
         if k == "ForLoop":
             for e in stmt.initializers:
                 self.eval(e)
@@ -432,9 +504,41 @@ class Interp:
         return
         yield  # pragma: no cover
 
-    def _store(self, lhs: Any, value: FourState, nonblocking: bool) -> Iterator:
+    def _store(self, lhs: Any, value: Any, nonblocking: bool) -> Iterator:
         ek = str(lhs.kind).split(".")[-1]
+        if ek == "MemberAccess":
+            base = self.eval(lhs.value)
+            if base is None:
+                raise SimulationError(
+                    f"null handle dereference writing .{lhs.member.name} "
+                    f"at t={self.kernel.time}")
+            pt = lhs.member.type
+            base.props[lhs.member.name] = value.resize(
+                int(pt.bitWidth), bool(getattr(pt, "isSigned", False)))
+            return
         if ek in ("NamedValue", "Conversion"):
+            sym = lhs.symbol if ek == "NamedValue" else lhs.operand.symbol
+            key = _key(sym)
+            sk = str(sym.kind).split(".")[-1]
+            for locals_, _this in reversed(self.frames):
+                if key in locals_:
+                    if isinstance(value, FourState) and \
+                            isinstance(locals_[key], FourState):
+                        value = value.resize(locals_[key].width,
+                                             locals_[key].signed)
+                    locals_[key] = value
+                    return
+            if sk == "ClassProperty":
+                if not self.frames or self.frames[-1][1] is None:
+                    raise _u(f"write to class property {sym.name} "
+                             "outside a method")
+                pt = sym.type
+                self.frames[-1][1].props[sym.name] = value.resize(
+                    int(pt.bitWidth), bool(getattr(pt, "isSigned", False)))
+                return
+            if key in self.handles:
+                self.handles[key] = value
+                return
             sig = self._lvalue_signal(lhs)
             (sig.nba_write if nonblocking else sig.write)(value)
             return
@@ -499,9 +603,19 @@ class Interp:
         if ek == "NamedValue":
             sym = expr.symbol
             sk = str(sym.kind).split(".")[-1]
+            key = _key(sym)
+            for locals_, _this in reversed(self.frames):
+                if key in locals_:
+                    return locals_[key]
+            if sk == "ClassProperty":
+                if not self.frames or self.frames[-1][1] is None:
+                    raise _u(f"class property {sym.name} outside a method")
+                return self.frames[-1][1].props[sym.name]
+            if key in self.handles:
+                return self.handles[key]
             if sk == "Parameter":
                 return _sv_to_fs(sym.value, width, signed)
-            sig = self.sigmap.get(_key(sym))
+            sig = self.sigmap.get(key)
             if sig is None:
                 raise _u(f"reference to un-elaborated symbol {sym.name}")
             return sig.read()
@@ -511,9 +625,17 @@ class Interp:
             return self._unop(str(expr.op).split(".")[-1],
                               self.eval(expr.operand), width)
         if ek == "BinaryOp":
-            return self._binop(str(expr.op).split(".")[-1],
-                               self.eval(expr.left), self.eval(expr.right),
-                               width)
+            lv, rv = self.eval(expr.left), self.eval(expr.right)
+            if isinstance(lv, NativeObject) or isinstance(rv, NativeObject) \
+                    or lv is None or rv is None:
+                op = str(expr.op).split(".")[-1]
+                same = lv is rv
+                if op in ("Equality", "CaseEquality"):
+                    return FourState(1, int(same), 0)
+                if op in ("Inequality", "CaseInequality"):
+                    return FourState(1, int(not same), 0)
+                raise _u(f"operator {op} on class handles")
+            return self._binop(str(expr.op).split(".")[-1], lv, rv, width)
         if ek == "ConditionalOp":
             pred = True
             for c in expr.conditions:
@@ -554,6 +676,22 @@ class Interp:
             if msb < lsb:
                 msb, lsb = lsb, msb
             return base.select_range(msb, lsb)
+        if ek == "NullLiteral":
+            return None
+        if ek == "NewClass":
+            return self._new_object(expr)
+        if ek == "MemberAccess":
+            base = self.eval(expr.value)
+            if base is None:
+                raise SimulationError(
+                    "null handle dereference accessing "
+                    f".{expr.member.name} at t={self.kernel.time}")
+            if not isinstance(base, NativeObject):
+                raise _u(f"member access on non-object ({expr.member.name})")
+            mk = str(expr.member.kind).split(".")[-1]
+            if mk != "ClassProperty":
+                raise _u(f"member access to {mk}")
+            return base.props[expr.member.name]
         if ek == "Call":
             return self._call(expr)
         if ek == "Assignment":
@@ -563,8 +701,8 @@ class Interp:
                 val = self._binop(str(expr.op).split(".")[-1],
                                   self.eval(expr.left), val,
                                   int(expr.left.type.bitWidth))
-            sig = self._lvalue_signal(expr.left)
-            sig.write(val)
+            for _ in self._store(expr.left, val, nonblocking=False):
+                raise SimulationError("expression assignment blocked")
             return val
         if ek == "StringLiteral":
             # only meaningful as a $display argument; represented separately
@@ -641,9 +779,83 @@ class Interp:
     # ==================================================================
     # system tasks
     # ==================================================================
-    def _call(self, expr: Any) -> FourState:
+    def _new_object(self, expr: Any) -> "NativeObject":
+        ct = expr.type
+        ct = getattr(ct, "canonicalType", ct)
+        props: dict[str, FourState] = {}
+        prop_syms = []
+        ctor = None
+        for m in ct:
+            mk = str(m.kind).split(".")[-1]
+            if mk == "ClassProperty":
+                prop_syms.append(m)
+            elif mk == "Subroutine" and m.name == "new":
+                ctor = m
+        obj = NativeObject(getattr(ct, "name", "class"), props)
+        # property defaults / initializers evaluate with `this` = the new obj
+        self.frames.append(({}, obj))
+        try:
+            for ps in prop_syms:
+                if bool(getattr(ps.type, "isClass", False)):
+                    raise _u("class-typed class properties (nested objects)")
+                w = int(ps.type.bitWidth)
+                sg = bool(getattr(ps.type, "isSigned", False))
+                init = getattr(ps, "initializer", None)
+                props[ps.name] = (self.eval(init).resize(w, sg)
+                                  if init is not None
+                                  else FourState.all_x(w, sg))
+        finally:
+            self.frames.pop()
+        cc = expr.constructorCall
+        args = list(cc.arguments) if cc is not None else []
+        if ctor is not None and getattr(ctor, "body", None) is not None:
+            self._call_subroutine(ctor, obj, args)
+        return obj
+
+    def _call_subroutine(self, sub: Any, this_obj: Any, args: list) -> Any:
+        formals = list(sub.arguments)
+        if len(args) != len(formals):
+            raise _u(f"call to {sub.name} with {len(args)} args "
+                     f"(expected {len(formals)}; defaults unsupported)")
+        frame: dict[str, Any] = {}
+        for f, a in zip(formals, args):
+            v = self.eval(a)
+            if isinstance(v, FourState):
+                v = v.resize(int(f.type.bitWidth),
+                             bool(getattr(f.type, "isSigned", False)))
+            frame[_key(f)] = v
+        self.frames.append((frame, this_obj))
+        try:
+            gen = self.exec_stmt(sub.body)
+            for _req in gen:
+                raise SimulationError(
+                    f"class method {sub.name} attempted to block - task "
+                    "methods with timing are not supported in N3")
+            return None
+        except _Return as r:
+            return r.value
+        finally:
+            self.frames.pop()
+
+    def _call(self, expr: Any) -> Any:
         if not expr.isSystemCall:
-            raise _u("user-defined function/task calls")
+            sub = expr.subroutine
+            name = getattr(sub, "name", "?")
+            if name in _CLASS_BUILTINS:
+                raise _u(f"built-in class method {name}() "
+                         "(randomize arrives with engine N4)")
+            this_expr = getattr(expr, "thisClass", None)
+            this_obj = None
+            if this_expr is not None:
+                this_obj = self.eval(this_expr)
+                if this_obj is None:
+                    raise SimulationError(
+                        f"null handle dereference calling .{name}() "
+                        f"at t={self.kernel.time}")
+            elif self.frames:
+                this_obj = self.frames[-1][1]   # unqualified method call
+            val = self._call_subroutine(sub, this_obj, list(expr.arguments))
+            return val if val is not None else FourState(1, 0, 0)
         name = expr.subroutine.subroutine.name
         args = list(expr.arguments)
         if name in ("$display", "$write"):

@@ -64,7 +64,7 @@ class NativeSimulator(Simulator):
 
     def version(self) -> str:
         import pyslang
-        return f"native-0.1 (slang {pyslang.__version__})"
+        return f"native-0.3 (slang {pyslang.__version__})"
 
     def exec_host(self) -> str:
         return "in-process"
@@ -80,7 +80,7 @@ class NativeSimulator(Simulator):
             "timing_delays": E,
             "vcd_waves": E,
             "fst_waves": U,
-            "classes": U,
+            "classes": E,
             "randomize": P,
             "constraints": P,
             "covergroups": P,
