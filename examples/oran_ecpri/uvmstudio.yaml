@@ -1,0 +1,63 @@
+# O-RAN eCPRI transport VIP — platform demonstration project.
+#
+# Traces to the eCPRI transport vplan (GATE0_ecpri_transport_vplan.md):
+# FR-ECPRI-001..006, 008, 009 in scope here; FR-007 (seq monotonicity) and
+# FR-010 (concatenation length) stay Lane-2 items.
+#
+# Unlike the earlier O-RAN suite's pure-combinational codecs (red-team
+# finding RT-001), this DUT is CLOCKED: a two-stage pack/unpack pipeline
+# with a valid handshake, so scoreboard checks exercise real sequential
+# behavior, not a self-referential function pair.
+name: oran_ecpri
+top: tb_top
+language_standard: "1800-2017"
+timescale: "1ns/1ps"
+
+uvm_home: ${UVM_HOME}
+
+filesets:
+  - name: rtl
+    files:
+      - rtl/ecpri_if.sv
+      - rtl/ecpri_codec.sv
+    include_dirs:
+      - rtl
+
+  - name: tb
+    files:
+      - tb/ecpri_pkg.sv
+      - tb/tb_top.sv
+    include_dirs:
+      - tb
+    defines:
+      - UVM_NO_DPI
+
+default_backend: verilator
+coverage: true
+waves: on_fail
+build_dir: build
+results_dir: results
+
+backend_options:
+  suppress_warnings:
+    - explicit-static
+    - width-trunc
+
+tests:
+  - name: ecpri_smoke_test
+    tier: L0
+    seeds: 1
+    timeout_s: 600
+    tags: [smoke, fr-ecpri-001, fr-ecpri-008]
+
+  - name: ecpri_random_test
+    tier: L1
+    seeds: 3
+    timeout_s: 900
+    tags: [random, fr-ecpri-003, fr-ecpri-004, fr-ecpri-006]
+
+  - name: ecpri_error_test
+    tier: L2
+    seeds: 2
+    timeout_s: 900
+    tags: [negative, fr-ecpri-001, fr-ecpri-003, fr-ecpri-004]

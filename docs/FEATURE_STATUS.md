@@ -188,6 +188,20 @@ explicit — so this is a portability fix, not a workaround.
 backend needs the same transformation. It is mechanical but it is not nothing,
 and it is the single biggest porting cost measured so far.
 
+### Known Verilator quirks found while building the eCPRI VIP
+
+- **ICE on bare-expression `cover property` in an interface**: `cover
+  property (expr);` (with or without an explicit clock) crashes Verilator
+  5.050 with `Internal Error: V3Localize.cpp:203: AstVarRef not under
+  function`. Workaround: wrap the expression in a named `property` block and
+  cover that — the golden_apb pattern. Assert properties are unaffected.
+- **`dist` weights are not honored**: constraint solving accepts `dist`
+  syntax (warning `CONSTRAINTIGN` suppressed) but draws uniformly. A dist on
+  a part-select and a dist over payload buckets both produced named coverage
+  holes at 88.24% functional. Portable fix: an explicit `rand` selector
+  variable with per-bucket range constraints — closed the VIP to **100.00%
+  functional (17/17 bins)**, verified by a clean re-run.
+
 ### Known Verilator lexer quirk
 
 `bins small = {...}` fails to parse: `small` collides with the Verilog drive-
