@@ -84,7 +84,7 @@ class NativeSimulator(Simulator):
             "randomize": P,
             "constraints": P,
             "covergroups": P,
-            "sva_concurrent": P,
+            "sva_concurrent": E,
             "uvm_1_2": U,
             "uvm_ieee_1800_2": U,
             "dpi_c": U,
@@ -197,6 +197,19 @@ class NativeSimulator(Simulator):
         if errors and status is RunStatus.PASS:
             status = RunStatus.FAIL
             reasons.extend(errors[:5])
+
+        # concurrent assertion verdicts (engine N2)
+        sva_fails = sum(r.fails for r in kernel.sva)
+        sva_vacuous = [r.name for r in kernel.sva if r.vacuous]
+        if sva_fails and status is RunStatus.PASS:
+            status = RunStatus.FAIL
+            reasons.extend(
+                f"assertion {r.name} failed {r.fails}x"
+                for r in kernel.sva if r.fails)
+        if sva_vacuous:
+            # GATE 7 policy: vacuous proves nothing — surfaced, not hidden
+            reasons.append(
+                "vacuous assertion(s): " + ", ".join(sva_vacuous[:5]))
         log_path.write_text(
             text + f"\n- native engine: "
             f"{'$finish at ' + str(kernel.finish_time) if kernel.finish_time is not None else 'event starvation'}"
@@ -205,12 +218,20 @@ class NativeSimulator(Simulator):
         if writer:
             writer.close(kernel.time)
 
+        counters = {
+            "sva_asserts": sum(1 for r in kernel.sva if r.kind == "assert"),
+            "sva_passes": sum(r.passes for r in kernel.sva),
+            "sva_fails": sum(r.fails for r in kernel.sva),
+            "sva_vacuous": sum(1 for r in kernel.sva if r.vacuous),
+            "sva_covered": sum(r.covered for r in kernel.sva),
+        } if kernel.sva else {}
+
         return RunResult(
             status=status, seed=request.seed, returncode=rc,
             duration_s=time.monotonic() - t0, backend=self.name,
             log_path=log_path,
             wave_path=(request.run_dir / "waves.vcd") if writer else None,
-            reasons=reasons,
+            reasons=reasons, counters=counters,
         )
 
     def failure_signature(self, result: RunResult) -> str:

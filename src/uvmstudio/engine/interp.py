@@ -37,7 +37,9 @@ SUPPORTED = (
     "begin/end, if/else, case/casez, for/while/repeat/forever loops; blocking "
     "and nonblocking assignment; # delays; @(edge) and @(*) controls; binary/"
     "unary/ternary operators; bit and part selects; concatenation; "
-    "$display/$write/$error/$fatal/$finish/$time"
+    "$display/$write/$error/$fatal/$finish/$time; concurrent assert/cover "
+    "property with @(edge), disable iff, |->, |=>, fixed ##N sequences, "
+    "$rose/$fell/$stable/$changed/$past/$sampled"
 )
 
 
@@ -60,6 +62,7 @@ class Interp:
         self.scopes: list[tuple[str, list[Signal]]] = []   # for VCD dumping
         self._driven: set[str] = set()
         self._inited_locals: set[str] = set()
+        self.sva_prev: dict[int, Any] | None = None
 
     # ==================================================================
     # elaboration
@@ -78,6 +81,7 @@ class Interp:
         local_signals: list[Signal] = []
         deferred_children: list[tuple[Any, str]] = []
         processes: list[tuple[Any, str]] = []
+        pending_label: str | None = None
 
         for m in members:
             kind = str(m.kind).split(".")[-1]
@@ -93,14 +97,25 @@ class Interp:
                         processes.append((("var_init", m, init), path))
             elif kind == "Parameter":
                 pass                                   # folded at eval time
+            elif kind == "StatementBlock":
+                pending_label = m.name or pending_label
             elif kind in ("Port", "TypeAlias", "TransparentMember",
-                          "TypeParameter", "Genvar", "StatementBlock",
+                          "TypeParameter", "Genvar", "Property", "Sequence",
                           "WildcardImport", "ExplicitImport"):
                 pass
             elif kind == "ContinuousAssign":
                 processes.append((("cassign", m.assignment), path))
             elif kind == "ProceduralBlock":
-                processes.append((("proc", m), path))
+                stmt = m.body
+                while hasattr(stmt, "body") and not \
+                        str(stmt.kind).endswith("ConcurrentAssertion"):
+                    stmt = stmt.body
+                if str(stmt.kind).endswith("ConcurrentAssertion"):
+                    label = pending_label or f"sva_{len(processes)}"
+                    pending_label = None
+                    processes.append((("sva", stmt, f"{path}.{label}"), path))
+                else:
+                    processes.append((("proc", m), path))
             elif kind == "Instance":
                 deferred_children.append((m, f"{path}.{m.name}"))
             else:
@@ -211,6 +226,20 @@ class Interp:
                     yield ("edges", [(s, "any") for s in reads])
 
             self.kernel.spawn(gen_ca(), f"{path}.assign")
+        elif kind == "sva":
+            from .sva import SvaAssertion
+            _, stmt, label = spec
+            ak = str(stmt.assertionKind).split(".")[-1]
+            if ak == "Assert":
+                akind = "assert"
+            elif ak == "CoverProperty":
+                akind = "cover"
+            else:
+                raise _u(f"assertion kind {ak}", path)
+            sva = SvaAssertion(self, label, akind, stmt.propertySpec,
+                               getattr(stmt, "ifFalse", None))
+            self.kernel.sva.append(sva.result)
+            self.kernel.spawn(sva.process(), label)
         elif kind == "proc":
             block = spec[1]
             pk = str(block.procedureKind).split(".")[-1]
@@ -633,6 +662,27 @@ class Interp:
                 self.kernel.finished = True
                 self.kernel.finish_time = self.kernel.time
             return FourState(1, 0, 0)
+        if name in ("$rose", "$fell", "$stable", "$changed",
+                    "$past", "$sampled"):
+            if self.sva_prev is None:
+                raise _u(f"{name} outside an assertion context")
+            sig = self._lvalue_signal(args[0])
+            cur = sig.value
+            prev = self.sva_prev.get(sig.key, FourState.all_x(sig.width))
+            if name == "$sampled":
+                return cur
+            if name == "$past":
+                return prev
+            if name == "$stable":
+                return FourState(1, int(cur.aval == prev.aval
+                                        and cur.bval == prev.bval), 0)
+            if name == "$changed":
+                return FourState(1, int(cur.aval != prev.aval
+                                        or cur.bval != prev.bval), 0)
+            p_c, c_c = prev.bit_char(0), cur.bit_char(0)
+            if name == "$rose":       # LRM: to 1 from non-1
+                return FourState(1, int(c_c == "1" and p_c != "1"), 0)
+            return FourState(1, int(c_c == "0" and p_c != "0"), 0)   # $fell
         if name == "$time" or name == "$stime":
             return FourState.from_int(self.kernel.time, 64)
         if name == "$finish" or name == "$stop":

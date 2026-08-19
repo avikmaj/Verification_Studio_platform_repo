@@ -113,6 +113,7 @@ class Kernel:
         self.tracking_writes: set[Signal] | None = None
         self.on_signal_change: Callable[[Signal, int], None] | None = None
         self.stdout: list[str] = []
+        self.sva: list = []          # SvaResult records
 
     # -- construction ------------------------------------------------------
     def signal(self, name: str, width: int, signed: bool = False) -> Signal:
