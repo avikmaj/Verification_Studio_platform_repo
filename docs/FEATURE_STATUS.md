@@ -208,6 +208,18 @@ and it is the single biggest porting cost measured so far.
   justified by this claim. Recorded per the capability-matrix falsification
   discipline: a deviation entry that does not reproduce is corrected in
   place, dated, never quietly deleted.
+- **Pipelined SVA attempts are MERGED (measured 2026-08-22)**: two
+  overlapping antecedent matches with the same failing obligation produce
+  **one** `%Error` from Verilator 5.050 where LRM 16.14.6 requires two
+  independent attempt failures (commercial simulators report two; the
+  native engine reports two). Pinned from both sides by
+  `test_differential_pipelined_attempts_both_fail`.
+- **`cover property` pass-action statements are silently dropped (measured
+  2026-08-22)**: `cover property (...) $display("HIT");` compiles clean and
+  never prints under Verilator 5.050. The native engine executes the pass
+  statement per LRM 16.14 (after fixing its own defect 34 — it had the same
+  bug). Pinned from both sides by
+  `test_differential_cover_pass_action_output`.
 
 ### Known Verilator lexer quirk
 
@@ -371,6 +383,24 @@ writer and round-trip through our own VCD reader.
 The subset is enumerated in `engine/interp.py::SUPPORTED`. Everything outside
 it raises `UnsupportedFeature` — the engine never silently downgrades.
 
+### Performance baseline — measured 2026-08-22 (`scripts/perf_baseline.py`)
+
+Cloud container (x86_64), outputs cross-checked between engines before
+timings accepted:
+
+| benchmark | work | native build | native run | native rate | Verilator build | Verilator run | Verilator rate | ratio |
+|---|---|---|---|---|---|---|---|---|
+| RTL counter+FSM | 20,000 cycles | 0.00 s | 20.8 s | 962 cyc/s | 1.47 s | 0.01 s | 2.86 M cyc/s | **~3000× slower** |
+| randomize() — 3 rand vars, 3 constraint blocks | 2,000 calls | 0.00 s | 25.8 s | 78 calls/s | 3.21 s | 23.3 s | 86 calls/s | **~1× (parity)** |
+
+Read it straight: for RTL the native engine is an interpreter and pays
+~3000× at runtime, offset only by zero build time (it wins on designs that
+run for less than ~1 s of Verilator time). For constrained-random the z3
+path is at parity with Verilator's solver — constraint solving dominates
+both engines, so the interpreter overhead disappears. "Performance
+unmeasured" (platform red-team bound 3) is retired: it is now measured,
+and the measurement is not flattering for RTL — recorded anyway.
+
 Engine defects found by its own bring-up (same discipline as the rest of the
 platform): pybind symbol wrappers have unstable `id()` (keyed the signal map
 on hierarchical paths); `@(*)` edge matching compared only bit 0 (missed 3→9
@@ -434,4 +464,5 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 30 | N3 sentinel-test refresh | fork/join was executing **sequentially** — the Block handler ignored `blockKind`, silently downgrading parallel semantics. Found when the "unsupported construct raises" test moved its sentinel from classes (now supported) to fork/join and it did NOT raise | Block handler now rejects non-Sequential kinds with the construct named. The never-downgrade promise is enforced by the test that caught its violation |
 | 31 | N4 dist counter test printed `x` | **two-state types initialized to X** — module vars, class properties, and method locals all defaulted to all-X regardless of type, violating LRM 6.8 (`bit`/`int` default to 0). Worse: the N3 test suite had **pinned the wrong semantics** (`bit [3:0] b` asserted `b=xxxx`) — a wrong expectation entrenched by a green test | default init now keys on `type.isFourState`: four-state → X, two-state → 0 (all three sites via one `_default_value`). Test repinned to LRM + cross-checked vs Verilator (`bit`→0 agrees; Verilator's `logic`→0-unless-`--x-initial` recorded as ITS deviation, native keeps LRM X) |
 | 32 | N4 silent-acceptance sweep | `rand bit [3:0] a [4]` (unpacked array) reached z3 as a **0-width BitVec and crashed with a raw Z3Exception** — an internal error where a named capability rejection was owed | `collect_rand_vars` rejects non-packed-integral rand variables by name before the solver is touched; pinned by test |
+| 34 | SVA differential widening | **cover/assert pass-action statements were silently dropped** — `cover property (...) $display(...)` accepted the statement and never executed it (LRM 16.14: the pass statement runs on each match/nonvacuous success). Same never-downgrade class as defect 30 | pass-action wired through both evaluation paths and executed on match; pinned by a differential test that also measures Verilator's own behavior on the same source |
 | 33 | N4 silent-acceptance sweep (signed constraints) | **unary minus dropped signedness**: `-5` was built as an unsigned 32-bit value, so `x.v > -5` on a signed variable compared unsigned and produced **silent wrong answers** (27/50 legal draws flagged bad). The z3 side was correct — the procedural checker was the liar, the worst combination for a differential methodology | `_unop` now takes the expression type's signedness; `Plus`/`Minus`/`BitwiseNot` preserve it. Verified: signed relational test 50/50 clean, unsigned wraparound (`8'd0-8'd1`=255) unchanged, Verilator agrees on the same source |

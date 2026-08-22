@@ -305,7 +305,8 @@ class Interp:
             else:
                 raise _u(f"assertion kind {ak}", path)
             sva = SvaAssertion(self, label, akind, stmt.propertySpec,
-                               getattr(stmt, "ifFalse", None))
+                               getattr(stmt, "ifFalse", None),
+                               getattr(stmt, "ifTrue", None))
             self.kernel.sva.append(sva.result)
             self.kernel.spawn(sva.process(), label)
         elif kind == "proc":

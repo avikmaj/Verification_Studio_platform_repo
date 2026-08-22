@@ -257,7 +257,8 @@ def test_vcd_writer_round_trips_through_our_reader(tmp_path):
 # Differential vs Verilator — the tests that make the claims real
 # ---------------------------------------------------------------------------
 
-_VERILATOR = shutil.which("verilator")
+from tests.unit._toolchain import find_verilator
+_VERILATOR = find_verilator()
 
 DIFF_DESIGNS = {
     "counter_reset": """

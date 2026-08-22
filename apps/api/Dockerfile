@@ -67,9 +67,12 @@ COPY apps /app/apps
 COPY examples /app/examples
 RUN pip3 install --no-cache-dir --break-system-packages -e /app
 
-# Seed the workspace with the golden acceptance project so a fresh deployment
-# has something real to compile and run.
-RUN mkdir -p /workspace && cp -r /app/examples/golden_apb /workspace/golden_apb
+# Seed the workspace with the golden acceptance project AND the eCPRI VIP so
+# remote runs exercise more than one project (red-team bound 5: "the remote
+# 4/4 covers the golden project only" — retired by seeding oran_ecpri).
+RUN mkdir -p /workspace \
+    && cp -r /app/examples/golden_apb /workspace/golden_apb \
+    && cp -r /app/examples/oran_ecpri /workspace/oran_ecpri
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

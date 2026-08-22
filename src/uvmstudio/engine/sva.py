@@ -87,9 +87,13 @@ class SvaAssertion:
     """One concurrent assertion: compiler + per-clock evaluator process."""
 
     def __init__(self, interp: Any, name: str, kind: str,
-                 spec: Any, action_else: Any | None) -> None:
+                 spec: Any, action_else: Any | None,
+                 action_pass: Any | None = None) -> None:
         self.interp = interp
         self.action_else = action_else
+        # LRM 16.14: the pass statement executes on each nonvacuous success
+        # (assert) / each match (cover). Dropping it silently was defect 34.
+        self.action_pass = action_pass
         self.result = SvaResult(name=name, kind=kind)
         self.prop = self._compile(spec)
         self._prev: dict[int, FourState] = {}      # signal key -> prev sample
@@ -175,6 +179,9 @@ class SvaAssertion:
             self._prev[sig.key] = sig.value
 
     def _complete(self) -> None:
+        if self.action_pass is not None:
+            for _ in self.interp.exec_stmt(self.action_pass):
+                break                      # action blocks must not block
         if self.result.kind == "cover":
             self.result.covered += 1
         else:
@@ -233,10 +240,16 @@ class SvaAssertion:
                 ok = self._eval_bool(prop.consequent[0].expr)
                 if self.result.kind == "cover":
                     if ok is True:
+                        if self.action_pass is not None:
+                            for _ in self.interp.exec_stmt(self.action_pass):
+                                break      # action blocks must not block
                         r.covered += 1
                 else:
                     r.nonvacuous += 1
                     if ok is True:
+                        if self.action_pass is not None:
+                            for _ in self.interp.exec_stmt(self.action_pass):
+                                break
                         r.passes += 1
                     else:
                         self._miss()

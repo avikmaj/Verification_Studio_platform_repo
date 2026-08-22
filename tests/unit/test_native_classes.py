@@ -180,7 +180,8 @@ endmodule""")
 # Differential vs Verilator
 # ---------------------------------------------------------------------------
 
-_VERILATOR = shutil.which("verilator")
+from tests.unit._toolchain import find_verilator
+_VERILATOR = find_verilator()
 
 
 def _run_verilator(src: str, tmp: Path) -> str:

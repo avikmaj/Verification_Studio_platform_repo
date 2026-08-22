@@ -351,7 +351,8 @@ endmodule""")
 # Differential vs Verilator 5.050
 # ---------------------------------------------------------------------------
 
-_VERILATOR = shutil.which("verilator")
+from tests.unit._toolchain import find_verilator
+_VERILATOR = find_verilator()
 
 
 def _run_verilator(src: str, tmp: Path, seed: int = 7) -> str:
