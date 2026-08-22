@@ -195,12 +195,19 @@ and it is the single biggest porting cost measured so far.
   5.050 with `Internal Error: V3Localize.cpp:203: AstVarRef not under
   function`. Workaround: wrap the expression in a named `property` block and
   cover that — the golden_apb pattern. Assert properties are unaffected.
-- **`dist` weights are not honored**: constraint solving accepts `dist`
-  syntax (warning `CONSTRAINTIGN` suppressed) but draws uniformly. A dist on
-  a part-select and a dist over payload buckets both produced named coverage
-  holes at 88.24% functional. Portable fix: an explicit `rand` selector
-  variable with per-bucket range constraints — closed the VIP to **100.00%
-  functional (17/17 bins)**, verified by a clean re-run.
+- **`dist` weights — claim CORRECTED (falsification re-measurement,
+  2026-08-22)**: the original bring-up recorded "dist weights are not
+  honored" after dist-shaped stimulus left named coverage holes at 88.24%.
+  Re-measured on this exact Verilator 5.050 build during N4 differential
+  work: **dist IS honored** — a class-constraint `dist {0:=8, [1:3]:/2}`
+  drew 303:97 over 400 draws with 0 out-of-set values, on a plain rand
+  variable AND on a part-select, with no `CONSTRAINTIGN` warning. The
+  original coverage holes therefore had a different cause than dist-dropping
+  (the shape that produced them was not preserved). The selector-variable
+  pattern in the eCPRI VIP remains valid portable style, but it is no longer
+  justified by this claim. Recorded per the capability-matrix falsification
+  discipline: a deviation entry that does not reproduce is corrected in
+  place, dated, never quietly deleted.
 
 ### Known Verilator lexer quirk
 
@@ -291,8 +298,8 @@ it may withdraw `UVM_NO_DPI` support.
 | Deterministic seeds and reproduction | SUPPORTED | measured, see §3 |
 | Frontend recognition of rand modes + constraint blocks | SUPPORTED | see §2 |
 | Lint over stimulus quality | PARTIALLY_SUPPORTED | unconstrained-rand and wide-`randc` rules implemented |
-| **Native constraint IR + Z3 solver path** | **PLANNED** | Z3 is installed and used *by Verilator*; the platform's own constraint engine is not built |
-| `solve...before` cycle detection | PLANNED | |
+| **Native z3-backed randomize() (engine N4)** | **EXPERIMENTAL** | `--backend native`: constraint blocks, `inside`, implication, if/else, `soft`, `dist` (SOLVED — membership + seeded weighted draw, never ignored), inline `with`, pre/post_randomize, seed-stable. See §8b |
+| `solve...before` cycle detection | PLANNED | `solve...before` itself is rejected by name in the native engine |
 | Hardcoded-literal (stimulus gap) detection | PLANNED | rule `CRV011` declared, not implemented |
 
 ## 7. Waveform
@@ -354,7 +361,11 @@ writer and round-trip through our own VCD reader.
 | **concurrent SVA (N2)** | EXPERIMENTAL | assert/cover property, @(edge), disable iff, `\|->`/`\|=>`, fixed ##N sequences, $rose/$fell/$stable/$changed/$past/$sampled; per-assertion attempts/nonvacuous/pass/fail/covered counters; **vacuity flagged per GATE 7** (vacuous ⇒ surfaced in reasons); action blocks execute; 11 tests incl. 2 differential (pass-silence and fail-firing agree with Verilator) |
 | SVA repetition `[*n]`, sequence antecedents, delay ranges `##[m:n]` | UNSUPPORTED (raises) | named in the error |
 | **classes (N3)** | EXPERIMENTAL | properties (defaults + initializers evaluated per object), function methods with true call frames, `new()` ctors with args, `this`, reference-semantics handles, null with diagnosed dereference, handle identity ==/!=; 9 tests incl. 2 differential (byte-identical vs Verilator on reference-aliasing and object-state designs) |
-| class inheritance / statics / parameterized classes / task methods with timing / randomize | UNSUPPORTED or PLANNED (raises) | randomize names N4 explicitly |
+| **z3-backed randomize() (N4)** | EXPERIMENTAL | constraint blocks (`inside`, relational/arith/logic ops, implication `->`, `if/else`, `soft`, `dist`), inline `randomize() with {}`, pre/post_randomize hooks (post only on success, per LRM), unsat → returns 0 and touches nothing, non-rand state never written, X/Z state in a constraint is a named error; **seed-stable**: one seeded RNG owns every stochastic choice (z3 does sat/model only), same seed → identical draw sequence; 18 tests incl. 2 differential (legality + dist membership/unsat agree with Verilator 5.050) |
+| dist policy (N4) | **SOLVED, never dropped** | membership in the weighted set is a hard constraint (zero-weight items excluded per LRM 18.5.4); value chosen by seeded weighted draw over the buckets, feasibility-checked; measured 326:74 over 400 draws for an 8:2 weighting, 0 out-of-set draws. `soft dist` is rejected by name |
+| soft policy (N4) | PARTIAL, stated | honored when jointly satisfiable, else ALL soft dropped together — LRM priority ordering between soft constraints is not implemented (named limitation) |
+| randc / solve-before / unique / foreach / rand arrays / >64-bit rand / partial randomize(args) / rand_mode / constraint_mode / srandom | UNSUPPORTED (raises) | each rejected by name — the N4 silent-acceptance sweep verified none is silently accepted |
+| class inheritance / statics / parameterized classes / task methods with timing | UNSUPPORTED or PLANNED (raises) | |
 | UVM / covergroups (native) | UNSUPPORTED (raises) | attempting them names the construct and the supported subset |
 
 The subset is enumerated in `engine/interp.py::SUPPORTED`. Everything outside
@@ -371,10 +382,10 @@ triggering comb settled on wrong values instead of reporting a zero-time loop
 
 Named explicitly so nothing is implied by omission:
 
-- Native SystemVerilog simulation kernel (scheduler, regions, delta cycles)
-- Native constraint solver and constraint IR
 - Native covergroup runtime
-- SVA evaluation engine
+  (the native kernel, SVA engine, and z3 constraint path exist as
+  EXPERIMENTAL — see §8b; they are no longer "not built" but are not
+  production either)
 - Transaction database and the unified verification graph
 - UVM-aware debugger (hierarchy/phase/objection/factory/config_db views)
 - Monaco/Tauri IDE, LSP server, cross-probing UI
@@ -421,3 +432,6 @@ Recorded because they are evidence the pipeline was exercised, not simulated.
 | 28 | red-team RT-P-003 (coverage-cross audit) | "100% functional (17/17)" was measured against a silently degraded model: `bins t[] = {[0:7]}` collapsed to ONE aggregate bin and both crosses inherited it — a single msg_type value would have scored 100% | explicit per-encoding bins; model now records **66/66 including 48 cross bins**, re-run clean at 100.00%. The self-referential trap the O-RAN red-team called RT-006, caught here by auditing what the coverage DB actually recorded |
 | 29 | red-team RT-P-005 (hierarchical waveform demo) | own VCD writer assigned colliding identifiers to port-unified signals and re-opened scopes from the root per path; value lookups on the dump returned nothing. The original round-trip test (flat scope, unique keys) was blind to both | proper VCD aliasing (one ident, multiple `$var` names) + scope-transition tracking; hierarchy+alias regression test added; round-trip verified value-correct |
 | 30 | N3 sentinel-test refresh | fork/join was executing **sequentially** — the Block handler ignored `blockKind`, silently downgrading parallel semantics. Found when the "unsupported construct raises" test moved its sentinel from classes (now supported) to fork/join and it did NOT raise | Block handler now rejects non-Sequential kinds with the construct named. The never-downgrade promise is enforced by the test that caught its violation |
+| 31 | N4 dist counter test printed `x` | **two-state types initialized to X** — module vars, class properties, and method locals all defaulted to all-X regardless of type, violating LRM 6.8 (`bit`/`int` default to 0). Worse: the N3 test suite had **pinned the wrong semantics** (`bit [3:0] b` asserted `b=xxxx`) — a wrong expectation entrenched by a green test | default init now keys on `type.isFourState`: four-state → X, two-state → 0 (all three sites via one `_default_value`). Test repinned to LRM + cross-checked vs Verilator (`bit`→0 agrees; Verilator's `logic`→0-unless-`--x-initial` recorded as ITS deviation, native keeps LRM X) |
+| 32 | N4 silent-acceptance sweep | `rand bit [3:0] a [4]` (unpacked array) reached z3 as a **0-width BitVec and crashed with a raw Z3Exception** — an internal error where a named capability rejection was owed | `collect_rand_vars` rejects non-packed-integral rand variables by name before the solver is touched; pinned by test |
+| 33 | N4 silent-acceptance sweep (signed constraints) | **unary minus dropped signedness**: `-5` was built as an unsigned 32-bit value, so `x.v > -5` on a signed variable compared unsigned and produced **silent wrong answers** (27/50 legal draws flagged bad). The z3 side was correct — the procedural checker was the liar, the worst combination for a differential methodology | `_unop` now takes the expression type's signedness; `Plus`/`Minus`/`BitwiseNot` preserve it. Verified: signed relational test 50/50 clean, unsigned wraparound (`8'd0-8'd1`=255) unchanged, Verilator agrees on the same source |

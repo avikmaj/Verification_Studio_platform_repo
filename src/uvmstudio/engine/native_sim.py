@@ -64,7 +64,7 @@ class NativeSimulator(Simulator):
 
     def version(self) -> str:
         import pyslang
-        return f"native-0.3 (slang {pyslang.__version__})"
+        return f"native-0.4 (slang {pyslang.__version__})"
 
     def exec_host(self) -> str:
         return "in-process"
@@ -81,8 +81,8 @@ class NativeSimulator(Simulator):
             "vcd_waves": E,
             "fst_waves": U,
             "classes": E,
-            "randomize": P,
-            "constraints": P,
+            "randomize": E,       # N4: z3-backed, dist solved not dropped
+            "constraints": E,     # N4: hard/soft/inside/dist/impl/if-else
             "covergroups": P,
             "sva_concurrent": E,
             "uvm_1_2": U,
@@ -92,7 +92,11 @@ class NativeSimulator(Simulator):
         }
 
     def solver_available(self) -> bool:
-        return False
+        try:
+            import z3  # noqa: F401
+            return True
+        except ImportError:
+            return False
 
     # -- build = elaborate -------------------------------------------------
     def build(self, request: BuildRequest) -> BuildResult:
@@ -152,7 +156,7 @@ class NativeSimulator(Simulator):
             )
         build_req, comp = stored
         kernel = Kernel()
-        interp = Interp(comp, kernel)
+        interp = Interp(comp, kernel, seed=request.seed)
         interp.elaborate()
 
         writer: VCDWriter | None = None

@@ -66,21 +66,26 @@ def test_reference_semantics_and_methods():
     assert "".join(k.stdout) == "sum=24 data=8\nsame=1 nullcheck=1\nr=260\n"
 
 
-def test_property_initializer_and_default_x():
+def test_property_initializer_and_defaults():
+    # LRM 6.8: two-state `bit` defaults to 0; four-state `logic` defaults
+    # to X. (The original N3 test wrongly pinned b=xxxx — caught in the N4
+    # defect-30-class sweep, defect 31. Verilator matches on `bit`; its
+    # `logic` inits to 0 unless --x-initial — a documented deviation.)
     k = _sim("""
 module tb;
   class c_thing;
     bit [3:0] a = 4'd9;
-    bit [3:0] b;          // no initializer: four-state X
+    bit [3:0] b;          // two-state, no initializer: 0
+    logic [3:0] c;        // four-state, no initializer: X
   endclass
   initial begin
     c_thing t;
     t = new;
-    $display("a=%0d b=%b", t.a, t.b);
+    $display("a=%0d b=%b c=%b", t.a, t.b, t.c);
     $finish;
   end
 endmodule""")
-    assert "".join(k.stdout) == "a=9 b=xxxx\n"
+    assert "".join(k.stdout) == "a=9 b=0000 c=xxxx\n"
 
 
 def test_null_dereference_is_a_diagnosed_error():
@@ -135,11 +140,13 @@ endmodule""")
     assert "".join(k.stdout) == "a=10 b=1 eq=0\n"
 
 
-def test_randomize_raises_planned_not_silent():
-    with pytest.raises(UnsupportedFeature, match="randomize"):
+def test_randc_raises_named_not_silent():
+    # randomize() itself is live since N4 (tests/unit/test_native_randomize
+    # .py); randc stays a named rejection — never silently degraded to rand
+    with pytest.raises(UnsupportedFeature, match="randc"):
         _sim("""
 module tb;
-  class c_r; rand bit [3:0] v; endclass
+  class c_r; randc bit [3:0] v; endclass
   initial begin
     c_r r;
     r = new;

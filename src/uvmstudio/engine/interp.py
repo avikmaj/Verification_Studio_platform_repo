@@ -40,7 +40,9 @@ SUPPORTED = (
     "$display/$write/$error/$fatal/$finish/$time; concurrent assert/cover "
     "property with @(edge), disable iff, |->, |=>, fixed ##N sequences, "
     "$rose/$fell/$stable/$changed/$past/$sampled; classes with properties, "
-    "function methods, new(), this, null, reference-semantics handles"
+    "function methods, new(), this, null, reference-semantics handles; "
+    "inside; z3-backed randomize() with constraint blocks (inside/dist/"
+    "soft/implication/if-else), inline with {}, pre/post_randomize"
 )
 
 
@@ -58,11 +60,13 @@ def _sv_to_fs(svint: Any, width: int, signed: bool) -> FourState:
 class NativeObject:
     """A class instance: named four-state properties, reference semantics."""
 
-    __slots__ = ("cls_name", "props")
+    __slots__ = ("cls_name", "props", "cls_sym")
 
-    def __init__(self, cls_name: str, props: dict[str, FourState]) -> None:
+    def __init__(self, cls_name: str, props: dict[str, FourState],
+                 cls_sym: Any = None) -> None:
         self.cls_name = cls_name
         self.props = props
+        self.cls_sym = cls_sym          # slang ClassType (engine N4)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<{self.cls_name} object at {id(self):#x}>"
@@ -76,15 +80,24 @@ class _Return(Exception):
 
 
 _CLASS_BUILTINS = frozenset({
-    "randomize", "pre_randomize", "post_randomize", "get_randstate",
-    "set_randstate", "srandom", "rand_mode", "constraint_mode",
+    # randomize() is handled in the system-call path (engine N4);
+    # user-defined pre/post_randomize are ordinary methods. The rest are
+    # rejected by name — never silently accepted.
+    "get_randstate", "set_randstate", "srandom", "rand_mode",
+    "constraint_mode",
 })
 
 
 class Interp:
-    def __init__(self, compilation: Any, kernel: Kernel | None = None) -> None:
+    def __init__(self, compilation: Any, kernel: Kernel | None = None,
+                 seed: int = 1) -> None:
+        import random
         self.comp = compilation
         self.kernel = kernel or Kernel()
+        # every stochastic choice in randomize() comes from this one RNG:
+        # same source + same seed -> identical draw sequence (engine N4)
+        self.seed = seed
+        self.rand_rng = random.Random(seed)
         self.sigmap: dict[str, Signal] = {}
         self.scopes: list[tuple[str, list[Signal]]] = []   # for VCD dumping
         self._driven: set[str] = set()
@@ -167,6 +180,13 @@ class Interp:
         for spec, ppath in processes:
             self._spawn(spec, ppath)
 
+    @staticmethod
+    def _default_value(t: Any, width: int, signed: bool) -> FourState:
+        """LRM 6.8: four-state types default to X, two-state types to 0."""
+        if bool(getattr(t, "isFourState", True)):
+            return FourState.all_x(width, signed)
+        return FourState.from_int(0, width, signed)
+
     def _make_signal(self, sym: Any, path: str) -> Signal:
         t = sym.type
         width = int(t.bitWidth)
@@ -174,6 +194,10 @@ class Interp:
             raise _u(f"zero-width type for {sym.name}", path)
         sig = self.kernel.signal(f"{path}.{sym.name}", width,
                                  bool(getattr(t, "isSigned", False)))
+        if not bool(getattr(t, "isFourState", True)):
+            # LRM 6.8: two-state types (bit/int/...) initialize to 0, not X
+            sig.value = FourState.from_int(
+                0, width, bool(getattr(t, "isSigned", False)))
         self.sigmap[_key(sym)] = sig
         return sig
 
@@ -411,7 +435,7 @@ class Interp:
                     sg = bool(getattr(sym.type, "isSigned", False))
                     locals_[k2] = (self.eval(init).resize(w, sg)
                                    if init is not None
-                                   else FourState.all_x(w, sg))
+                                   else self._default_value(sym.type, w, sg))
                 return
             if bool(getattr(sym.type, "isClass", False)):
                 if k2 not in self.handles:
@@ -623,7 +647,7 @@ class Interp:
             return self.eval(expr.operand).resize(width, signed)
         if ek == "UnaryOp":
             return self._unop(str(expr.op).split(".")[-1],
-                              self.eval(expr.operand), width)
+                              self.eval(expr.operand), width, signed)
         if ek == "BinaryOp":
             lv, rv = self.eval(expr.left), self.eval(expr.right)
             if isinstance(lv, NativeObject) or isinstance(rv, NativeObject) \
@@ -676,6 +700,23 @@ class Interp:
             if msb < lsb:
                 msb, lsb = lsb, msb
             return base.select_range(msb, lsb)
+        if ek == "Inside":
+            # LRM 11.4.13: 1 if any match, 0 if all mismatch, X otherwise
+            v = self.eval(expr.left)
+            any_x = False
+            for r in expr.rangeList:
+                if str(r.kind).split(".")[-1] == "ValueRange":
+                    lo, hi = self.eval(r.left), self.eval(r.right)
+                    ge, le = v.ge(lo), v.le(hi)
+                    both = ge.bit_and(le, 1)
+                    t = both.is_true()
+                else:
+                    t = v.eq(self.eval(r)).is_true()
+                if t is True:
+                    return FourState(1, 1, 0)
+                if t is None:
+                    any_x = True
+            return FourState.all_x(1) if any_x else FourState(1, 0, 0)
         if ek == "NullLiteral":
             return None
         if ek == "NewClass":
@@ -709,13 +750,18 @@ class Interp:
             raise _u("string literal outside a system-task argument")
         raise _u(f"expression {expr.kind}")
 
-    def _unop(self, op: str, v: FourState, width: int) -> FourState:
+    def _unop(self, op: str, v: FourState, width: int,
+              signed: bool = False) -> FourState:
         if op == "Plus":
-            return v.resize(width)
+            return v.resize(width, signed)
         if op == "Minus":
-            return FourState.from_int(0, width).sub(v, width)
+            # result signedness follows the expression type — dropping it
+            # made `-5` a huge unsigned and broke signed relationals
+            # (defect 33, found by the N4 silent-acceptance sweep)
+            return FourState.from_int(0, width, signed).sub(
+                v.resize(width, signed), width).resize(width, signed)
         if op == "BitwiseNot":
-            return v.resize(width).bit_not()
+            return v.resize(width, signed).bit_not()
         if op == "LogicalNot":
             t = v.is_true()
             return FourState.all_x(1) if t is None else FourState(1, int(not t), 0)
@@ -791,7 +837,7 @@ class Interp:
                 prop_syms.append(m)
             elif mk == "Subroutine" and m.name == "new":
                 ctor = m
-        obj = NativeObject(getattr(ct, "name", "class"), props)
+        obj = NativeObject(getattr(ct, "name", "class"), props, ct)
         # property defaults / initializers evaluate with `this` = the new obj
         self.frames.append(({}, obj))
         try:
@@ -803,7 +849,7 @@ class Interp:
                 init = getattr(ps, "initializer", None)
                 props[ps.name] = (self.eval(init).resize(w, sg)
                                   if init is not None
-                                  else FourState.all_x(w, sg))
+                                  else self._default_value(ps.type, w, sg))
         finally:
             self.frames.pop()
         cc = expr.constructorCall
@@ -843,7 +889,7 @@ class Interp:
             name = getattr(sub, "name", "?")
             if name in _CLASS_BUILTINS:
                 raise _u(f"built-in class method {name}() "
-                         "(randomize arrives with engine N4)")
+                         "(not supported in engine N4)")
             this_expr = getattr(expr, "thisClass", None)
             this_obj = None
             if this_expr is not None:
@@ -858,6 +904,8 @@ class Interp:
             return val if val is not None else FourState(1, 0, 0)
         name = expr.subroutine.subroutine.name
         args = list(expr.arguments)
+        if name == "randomize":
+            return self._randomize_call(expr, args)
         if name in ("$display", "$write"):
             text = self._format_args(args)
             out = text + ("\n" if name == "$display" else "")
@@ -902,6 +950,39 @@ class Interp:
             self.kernel.finish_time = self.kernel.time
             return FourState(1, 0, 0)
         raise _u(f"system call {name}")
+
+    def _randomize_call(self, expr: Any, args: list) -> FourState:
+        """obj.randomize() — engine N4, z3-backed (see engine/randomize.py
+        for the dist / soft / seed policies)."""
+        from .randomize import do_randomize
+        obj = None
+        if args:
+            if len(args) > 1:
+                raise _u("randomize() with variable arguments "
+                         "(partial randomization)")
+            recv = self.eval(args[0])
+            if isinstance(recv, NativeObject):
+                obj = recv
+            elif recv is None:
+                raise SimulationError(
+                    "null handle dereference calling .randomize() "
+                    f"at t={self.kernel.time}")
+            else:
+                raise _u("scope randomize (std::randomize) — only "
+                         "object.randomize() is supported")
+        elif self.frames and self.frames[-1][1] is not None:
+            obj = self.frames[-1][1]    # unqualified call inside a method
+        if obj is None:
+            raise _u("randomize() with no receiver object")
+        info = getattr(expr.subroutine, "extraInfo", None)
+        inline = getattr(info, "inlineConstraints", None) \
+            if info is not None else None
+        restrictions = getattr(info, "constraintRestrictions", None) \
+            if info is not None else None
+        if restrictions:
+            raise _u("randomize() constraint restrictions")
+        ok = do_randomize(self, obj, inline)
+        return FourState.from_int(ok, 32)
 
     def _format_args(self, args: list) -> str:
         if not args:
