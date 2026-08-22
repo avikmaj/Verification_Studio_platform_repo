@@ -81,6 +81,54 @@ study of the O-RAN scale.
 
 ---
 
+## Job-runner red-team — hostile source / yaml (executed 2026-08-22)
+
+Scope: the untrusted-project boundary. A `uvmstudio.yaml` is attacker-
+controlled input the moment the platform ingests a third-party VIP (the
+amba_bfm / O-RAN onboarding path) or exposes any upload endpoint. Every
+attack below was **executed** against a real `Project.load`, then re-run
+after the fix.
+
+**Reachability first (stated, not assumed):** the deployed API has **no
+upload endpoint** — `/jobs` takes a project *directory name* confined to the
+workspace by `_safe_project_path`, so today only server-seeded projects
+(`golden_apb`, `oran_ecpri`) run remotely. The findings below were therefore
+**latent** — not remotely live — but they are real primitives that go live
+the instant an untrusted yaml is loaded. Fixed at the primitive, not left to
+the absence of a reachable path.
+
+### RT-J-001 — source/include path escape: **FOUND → FIXED**
+A hostile `files: [/etc/passwd]`, `files: ["../../../etc/hostname"]`, or a
+symlink inside the project pointing out, all resolved **outside the project
+root** and would be handed to the compiler, whose diagnostics echo file
+content — an arbitrary server-file read. Fixed: `Project.load(...,
+confine=True)` (the API's mode) refuses any source or include path whose
+*resolved* location escapes the root — catching absolute paths, `..`, and
+symlinks in one check. Six attack shapes now blocked; pinned by
+`test_job_runner_redteam.py`.
+
+### RT-J-002 — env-var exfil through error text: **FOUND → FIXED**
+`files: ["${UVMSTUDIO_API_TOKEN}.sv"]` expanded the secret into a path, and
+the "source file not found: SECRET-TOKEN-abc123.sv" error **echoed it back**.
+Fixed: confined `_expand` allowlists env vars (`UVM_HOME` only) and refuses
+any other **by name, without reading its value** — the secret can no longer
+reach the error text.
+
+### RT-J-003 — arbitrary uvm_home: **FOUND → FIXED**
+`uvm_home: /etc` added `/etc` to the include path. Fixed: in confined mode
+`uvm_home` must resolve to the server's own `$UVM_HOME` (the allowlisted
+`${UVM_HOME}` reference); any other value is refused. Both seeded projects,
+which use `uvm_home: ${UVM_HOME}`, still load confined.
+
+### RT-J-004 — resource exhaustion: **OPEN, BOUNDED (not fixed)**
+A hostile source with a huge `generate` loop or deep elaboration can OOM the
+worker. `MAX_CONCURRENT=1` and the 3600 s job timeout bound wall-clock and
+concurrency but **not memory**. A per-job memory cap (cgroup on the worker
+subprocess) is the fix and is not implemented — stated here rather than
+claimed. The remote container's own limit is the only current backstop.
+
+---
+
 ## Bounds — what the claims do NOT prove (accepted, not hidden)
 
 1. **"13/13 unmodified" is a platform-integration result.** It proves the
@@ -120,8 +168,10 @@ study of the O-RAN scale.
    now exercised remotely; "any project" remains unproven — one-yaml
    onboarding of further suites is the standing path.
 6. **No DAST ran on the API** (no HawkScan credentials in this
-   environment); its security posture rests solely on the documented
-   trusted-deployment stance in DEPLOYMENT.md.
+   environment). The hostile-yaml surface is now covered by the executed
+   job-runner red-team above (RT-J-001..004, three fixed and pinned, one
+   open+bounded); network/transport-level DAST of the HTTP surface remains
+   unrun.
 7. **The mutation set is 3**, chosen to span data path, encode path and
    checker blindness — indicative, not exhaustive.
 

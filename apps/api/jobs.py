@@ -156,7 +156,8 @@ class JobQueue:
             job.started = time.time()
             job.write(f"[{job.kind.value}] project={job.project}")
 
-            proj = Project.load(self.root / job.project)
+            # confine=True: untrusted-boundary load (see app.py::_load)
+            proj = Project.load(self.root / job.project, confine=True)
             handler = {
                 JobKind.COMPILE: self._compile,
                 JobKind.LINT: self._lint,

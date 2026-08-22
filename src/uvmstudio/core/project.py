@@ -26,15 +26,33 @@ LANGUAGE_STANDARDS = ("1800-2017", "1800-2023")
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def _expand(value: str) -> str:
+# In confined mode only these env vars may be interpolated by a project file.
+# Everything else is refused BY NAME — never expanded, so its value can never
+# be echoed back through a "file not found" error (the env-exfil vector the
+# job-runner red-team found, RT-J-002).
+_CONFINED_ENV_ALLOWLIST = frozenset({"UVM_HOME"})
+
+
+def _expand(value: str, *, confine: bool = False) -> str:
     """Expand ${VAR} against the environment. Missing vars are an error, not ''.
 
     Silently expanding an unset variable to an empty string is how build systems
     produce runs that cannot be reproduced.
+
+    In confined mode (untrusted project file) only `_CONFINED_ENV_ALLOWLIST`
+    variables may be referenced; any other name is refused without ever reading
+    its value, so a hostile file cannot exfiltrate a secret through the error
+    text it produces.
     """
 
     def repl(m: re.Match[str]) -> str:
         name = m.group(1)
+        if confine and name not in _CONFINED_ENV_ALLOWLIST:
+            raise ProjectError(
+                f"project file references ${{{name}}}, which is not permitted "
+                f"for an untrusted project (allowed: "
+                f"{', '.join(sorted(_CONFINED_ENV_ALLOWLIST))})"
+            )
         if name not in os.environ:
             raise ProjectError(
                 f"environment variable ${{{name}}} referenced in project file is not set"
@@ -105,10 +123,15 @@ class Project:
     waves: str = "on_fail"                  # always | on_fail | never
     build_dir: str = "build"
     results_dir: str = "results"
+    # Untrusted-project mode. When True, source/include paths that escape the
+    # project root are refused, yaml-supplied uvm_home is ignored in favour of
+    # the server environment, and env interpolation is allowlisted. The API
+    # (the untrusted boundary) always loads confined; local dev defaults off.
+    confine: bool = False
 
     # -- construction -----------------------------------------------------
     @staticmethod
-    def load(path: Path | str) -> "Project":
+    def load(path: Path | str, *, confine: bool = False) -> "Project":
         path = Path(path)
         if path.is_dir():
             path = path / PROJECT_FILENAME
@@ -120,10 +143,10 @@ class Project:
             raise ProjectError(f"{path}: invalid YAML: {exc}") from exc
         if not isinstance(raw, dict):
             raise ProjectError(f"{path}: top level must be a mapping")
-        return Project.from_dict(raw, root=path.parent.resolve())
+        return Project.from_dict(raw, root=path.parent.resolve(), confine=confine)
 
     @staticmethod
-    def from_dict(raw: dict, *, root: Path) -> "Project":
+    def from_dict(raw: dict, *, root: Path, confine: bool = False) -> "Project":
         for key in ("name", "top"):
             if key not in raw:
                 raise ProjectError(f"project file missing required key '{key}'")
@@ -146,8 +169,10 @@ class Project:
             filesets.append(
                 FileSet(
                     name=entry["name"],
-                    files=[_expand(f) for f in entry.get("files", [])],
-                    include_dirs=[_expand(d) for d in entry.get("include_dirs", [])],
+                    files=[_expand(f, confine=confine)
+                           for f in entry.get("files", [])],
+                    include_dirs=[_expand(d, confine=confine)
+                                  for d in entry.get("include_dirs", [])],
                     defines=list(entry.get("defines", [])),
                 )
             )
@@ -163,12 +188,26 @@ class Project:
 
         uvm_home = raw.get("uvm_home")
         if uvm_home:
-            uvm_home = _expand(uvm_home)
+            uvm_home = _expand(uvm_home, confine=confine)
+            if confine:
+                # A hostile file must not point uvm_home at an arbitrary dir
+                # (RT-J-003). The allowlisted `${UVM_HOME}` reference is the
+                # only legitimate confined use; require the value to resolve to
+                # the server's own UVM home, never a path the file chose.
+                server_home = os.environ.get("UVM_HOME")
+                if not server_home or \
+                        Path(uvm_home).resolve() != Path(server_home).resolve():
+                    raise ProjectError(
+                        "in confined mode uvm_home must reference the server "
+                        "$UVM_HOME (use `uvm_home: ${UVM_HOME}`), not a path "
+                        "chosen by the project file"
+                    )
 
         return Project(
             name=raw["name"],
             root=root,
             top=raw["top"],
+            confine=confine,
             language_standard=std,
             timescale=raw.get("timescale"),
             uvm_version=raw.get("uvm_version"),
@@ -189,6 +228,25 @@ class Project:
     def _resolve(self, item: str) -> Path:
         p = Path(item)
         return p if p.is_absolute() else (self.root / p)
+
+    def _confine_check(self, resolved: Path, what: str, entry: str) -> None:
+        """In confined mode, refuse any path that escapes the project root.
+
+        Uses the fully resolved path, so `..` traversal, absolute paths, and
+        symlinks that leave the tree are all caught (RT-J-001). The resolved
+        UVM home is the one permitted exception and is checked by the caller,
+        not here. The error names the offending entry, never a file's content.
+        """
+        if not self.confine:
+            return
+        root = self.root.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ProjectError(
+                f"{what} {entry!r} resolves outside the project root — refused "
+                f"for an untrusted project"
+            )
 
     def source_files(self, *, filesets: list[str] | None = None) -> list[Path]:
         """Ordered, de-duplicated, glob-expanded source list.
@@ -234,6 +292,7 @@ class Project:
                     candidates = [base]
                 for c in candidates:
                     rc = c.resolve()
+                    self._confine_check(rc, "source file", entry)
                     if rc not in seen:
                         seen.add(rc)
                         out.append(rc)
@@ -249,6 +308,7 @@ class Project:
                 continue
             for d in fs.include_dirs:
                 p = self._resolve(d).resolve()
+                self._confine_check(p, "include dir", d)
                 if not p.is_dir():
                     raise ProjectError(f"include dir does not exist: {p}")
                 if p not in seen:

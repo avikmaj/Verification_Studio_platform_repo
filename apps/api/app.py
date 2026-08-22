@@ -110,8 +110,12 @@ def _safe_project_path(name: str) -> Path:
 
 
 def _load(name: str) -> Project:
+    # confine=True: the API is the untrusted boundary. A project file here may
+    # not name source/include paths outside its own root, may not point
+    # uvm_home anywhere but the server's, and may not interpolate arbitrary
+    # env vars (job-runner red-team RT-J-001..003).
     try:
-        return Project.load(_safe_project_path(name))
+        return Project.load(_safe_project_path(name), confine=True)
     except StudioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
