@@ -42,7 +42,9 @@ SUPPORTED = (
     "$rose/$fell/$stable/$changed/$past/$sampled; classes with properties, "
     "function methods, new(), this, null, reference-semantics handles; "
     "inside; z3-backed randomize() with constraint blocks (inside/dist/"
-    "soft/implication/if-else), inline with {}, pre/post_randomize"
+    "soft/implication/if-else), inline with {}, pre/post_randomize; "
+    "covergroups with coverpoints, explicit/auto bins, illegal_bins/"
+    "ignore_bins, cross coverage, @(edge) or .sample() sampling"
 )
 
 
@@ -106,6 +108,7 @@ class Interp:
         # class support (engine N3)
         self.handles: dict[str, Any] = {}     # handle var path -> obj|None
         self.frames: list[tuple[dict[str, Any], Any]] = []  # (locals, this)
+        self.covergroups: dict[str, Any] = {}  # cg var key -> NativeCovergroup
 
     # ==================================================================
     # elaboration
@@ -129,6 +132,11 @@ class Interp:
         for m in members:
             kind = str(m.kind).split(".")[-1]
             if kind in ("Variable", "Net"):
+                if bool(getattr(m.type, "isCovergroup", False)):
+                    # engine N5: a covergroup instance. Build it and, if it has
+                    # a clocking event, spawn a sampler. `.sample()` also works.
+                    processes.append((("covergroup", m), path))
+                    continue
                 if bool(getattr(m.type, "isClass", False)):
                     self.handles[_key(m)] = None
                     init = getattr(m, "initializer", None)
@@ -150,9 +158,9 @@ class Interp:
                 pending_label = m.name or pending_label
             elif kind in ("Port", "TypeAlias", "TransparentMember",
                           "TypeParameter", "Genvar", "Property", "Sequence",
-                          "ClassType",
+                          "ClassType", "CovergroupType",
                           "WildcardImport", "ExplicitImport"):
-                pass
+                pass                # a covergroup *type*; instances handled above
             elif kind == "ContinuousAssign":
                 processes.append((("cassign", m.assignment), path))
             elif kind == "ProceduralBlock":
@@ -309,6 +317,14 @@ class Interp:
                                getattr(stmt, "ifTrue", None))
             self.kernel.sva.append(sva.result)
             self.kernel.spawn(sva.process(), label)
+        elif kind == "covergroup":
+            from .covergroups import NativeCovergroup
+            m = spec[1]
+            cg = NativeCovergroup(self, m.type, f"{path}.{m.name}")
+            self.covergroups[_key(m)] = cg
+            self.kernel.covergroups.append(cg)
+            if cg.event is not None:
+                self.kernel.spawn(self._cg_sampler(cg), f"{path}.{m.name}")
         elif kind == "proc":
             block = spec[1]
             pk = str(block.procedureKind).split(".")[-1]
@@ -325,6 +341,13 @@ class Interp:
                 raise _u(f"procedural block kind {block.procedureKind}", path)
         else:  # pragma: no cover - defensive
             raise _u(kind, path)
+
+    def _cg_sampler(self, cg: Any) -> Iterator:
+        """Sample a covergroup on every occurrence of its clocking event."""
+        sig, edge = cg.event
+        while True:
+            yield ("edges", [(sig, edge)])
+            cg.sample()
 
     def _forever(self, body: Any) -> Iterator:
         # `always begin ... end` — body typically opens with a timing control.
@@ -888,6 +911,20 @@ class Interp:
         if not expr.isSystemCall:
             sub = expr.subroutine
             name = getattr(sub, "name", "?")
+            # engine N5: covergroup built-in methods on an instance
+            this_expr = getattr(expr, "thisClass", None)
+            if this_expr is not None and \
+                    str(this_expr.kind).split(".")[-1] == "NamedValue":
+                cg = self.covergroups.get(_key(this_expr.symbol))
+                if cg is not None:
+                    if name == "sample":
+                        cg.sample()
+                        return FourState(1, 0, 0)
+                    if name == "get_coverage" or name == "get_inst_coverage":
+                        return FourState.from_int(
+                            int(cg.report()["overall"]), 32)
+                    raise _u(f"covergroup method {name}() "
+                             "(only sample()/get_coverage() in N5)")
             if name in _CLASS_BUILTINS:
                 raise _u(f"built-in class method {name}() "
                          "(not supported in engine N4)")

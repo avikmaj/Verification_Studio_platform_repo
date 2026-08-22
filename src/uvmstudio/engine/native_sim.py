@@ -64,7 +64,7 @@ class NativeSimulator(Simulator):
 
     def version(self) -> str:
         import pyslang
-        return f"native-0.4 (slang {pyslang.__version__})"
+        return f"native-0.5 (slang {pyslang.__version__})"
 
     def exec_host(self) -> str:
         return "in-process"
@@ -83,7 +83,7 @@ class NativeSimulator(Simulator):
             "classes": E,
             "randomize": E,       # N4: z3-backed, dist solved not dropped
             "constraints": E,     # N4: hard/soft/inside/dist/impl/if-else
-            "covergroups": P,
+            "covergroups": E,   # N5: coverpoints, bins, cross, illegal/ignore
             "sva_concurrent": E,
             "uvm_1_2": U,
             "uvm_ieee_1800_2": U,
@@ -227,6 +227,13 @@ class NativeSimulator(Simulator):
             "sva_vacuous": sum(1 for r in kernel.sva if r.vacuous),
             "sva_covered": sum(r.covered for r in kernel.sva),
         } if kernel.sva else {}
+
+        # functional coverage (engine N5)
+        cg_reports = [cg.report() for cg in kernel.covergroups]
+        if cg_reports:
+            overall = sum(r["overall"] for r in cg_reports) / len(cg_reports)
+            counters["covergroups"] = len(cg_reports)
+            counters["functional_coverage_pct"] = round(overall, 2)
 
         return RunResult(
             status=status, seed=request.seed, returncode=rc,

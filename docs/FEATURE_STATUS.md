@@ -389,8 +389,10 @@ writer and round-trip through our own VCD reader.
 | dist policy (N4) | **SOLVED, never dropped** | membership in the weighted set is a hard constraint (zero-weight items excluded per LRM 18.5.4); value chosen by seeded weighted draw over the buckets, feasibility-checked; measured 326:74 over 400 draws for an 8:2 weighting, 0 out-of-set draws. `soft dist` is rejected by name |
 | soft policy (N4) | PARTIAL, stated | honored when jointly satisfiable, else ALL soft dropped together — LRM priority ordering between soft constraints is not implemented (named limitation) |
 | randc / solve-before / unique / foreach / rand arrays / >64-bit rand / partial randomize(args) / rand_mode / constraint_mode / srandom | UNSUPPORTED (raises) | each rejected by name — the N4 silent-acceptance sweep verified none is silently accepted |
+| **covergroups (N5)** | EXPERIMENTAL | coverpoints (explicit + automatic bins, `auto_bin_max=64`), `illegal_bins` (hit → diagnosed failure), `ignore_bins` (excluded from the denominator), cross coverage, sampling on `@(edge)` or explicit `.sample()`, X samples hit nothing (LRM 19.5); coverage% is covered/total per point and the unweighted mean across points+crosses; `get_coverage()`/`get_inst_coverage()` return the overall. 12 tests incl. 2 differential (portable-SV run + illegal-bin agreement vs Verilator 5.050) |
+| covergroup limitations (N5), stated | PARTIAL | `option.weight`, `at_least > 1`, `wildcard bins`, transition bins (`=>`), and `binsof`/intersect cross selection are NOT modeled — each is a named gap, not a silent drop; a percentage-level differential vs `verilator_coverage` is not claimed (bin/cross construction is implementation-defined) |
 | class inheritance / statics / parameterized classes / task methods with timing | UNSUPPORTED or PLANNED (raises) | |
-| UVM / covergroups (native) | UNSUPPORTED (raises) | attempting them names the construct and the supported subset |
+| UVM (native) | UNSUPPORTED (raises) | attempting it names the construct and the supported subset |
 
 The subset is enumerated in `engine/interp.py::SUPPORTED`. Everything outside
 it raises `UnsupportedFeature` — the engine never silently downgrades.

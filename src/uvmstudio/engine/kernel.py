@@ -114,6 +114,7 @@ class Kernel:
         self.on_signal_change: Callable[[Signal, int], None] | None = None
         self.stdout: list[str] = []
         self.sva: list = []          # SvaResult records
+        self.covergroups: list = []  # NativeCovergroup instances (engine N5)
 
     # -- construction ------------------------------------------------------
     def signal(self, name: str, width: int, signed: bool = False) -> Signal:
