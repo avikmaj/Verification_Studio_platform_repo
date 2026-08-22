@@ -1,13 +1,29 @@
-# UVM Verification Studio
+# UVM Verification Studio — README
 
-A SystemVerilog/UVM verification platform: real language frontend, replaceable
-simulator backends, functional coverage, waveform analysis, regression
-orchestration, reproducibility and CI generation.
+**Package:** `uvm_verification_studio` — a full-stack SystemVerilog/UVM
+verification platform: real IEEE-1800 language frontend, replaceable simulator
+backends, an own event-driven simulation engine, functional coverage, waveform
+analysis, regression orchestration, reproducibility, and CI generation.
+**Author:** AVIK MAJUMDAR
+
+![platform](https://img.shields.io/badge/methodology-SystemVerilog%20%2F%20UVM-blue)
+![frontend](https://img.shields.io/badge/frontend-slang%2011.0.0-blue)
+![simulator](https://img.shields.io/badge/simulator-Verilator%205.050-blue)
+![uvm](https://img.shields.io/badge/UVM-Accellera%202020.3.1-blue)
+![native engine](https://img.shields.io/badge/native%20engine-N1--N4%20EXPERIMENTAL-orange)
+![tests](https://img.shields.io/badge/tests-155%20passing-brightgreen)
+![PASS](https://img.shields.io/badge/PASS-simulator%20evidence%20only-brightgreen)
+![license](https://img.shields.io/badge/license-MIT-informational)
+
+> **PASS authority.** A test is PASS only when a simulator executed it and the
+> evidence says so. Every run writes `repro.json` and a per-run log parsed for
+> named evidence — that evidence is the single source of truth. Nothing is
+> inferred from code inspection, and `NOT_VERIFIED` is never reported as PASS.
 
 **Not** a mock IDE, not a toy SystemVerilog interpreter, not a UVM clone. It
-drives a real IEEE 1800 frontend (slang), executes on a real simulator, reads
-real coverage databases and real waveforms, and refuses to report a result it
-did not observe.
+drives a real IEEE 1800 frontend (slang), executes on a real simulator (and,
+experimentally, its own kernel), reads real coverage databases and real
+waveforms, and refuses to report a result it did not observe.
 
 ---
 
@@ -149,19 +165,31 @@ says so.
 
 ## Status
 
-Stages 0-3 of the roadmap are implemented and executable end to end:
-project model → frontend → elaboration → lint → build → run → seeds →
-regression → coverage → waveform → reproducibility → reports → CI.
+The full pipeline is implemented and executable end to end: project model →
+frontend → elaboration → lint → build → run → seeds → regression → coverage →
+waveform → reproducibility → reports → CI. Real Accellera UVM builds and runs
+locally, in a 1 GB cgroup (low-memory build mode, behavioral parity proven),
+and on the free-tier cloud backend.
 
-Constrained-random and covergroup execution run on the simulator backend.
-A native constraint solver (Z3-backed) and a native simulation kernel are
-`PLANNED`; see `docs/ROADMAP.md`.
+The **native simulation engine** (`--backend native`) is our own — no external
+toolchain. It has shipped four increments, all `EXPERIMENTAL` and each
+differential-tested against Verilator 5.050:
 
-`docs/FEATURE_STATUS.md` is the authoritative capability record, with the
-evidence for every claim.
+| increment | capability |
+|---|---|
+| **N1** | event-driven four-state kernel + own VCD writer |
+| **N2** | concurrent SVA (assert/cover, `\|->`/`\|=>`, `disable iff`, `##N`, sampled-value fns), vacuity-aware |
+| **N3** | classes — properties, methods, `new()`, `this`, reference-semantics handles, null diagnosis |
+| **N4** | z3-backed `randomize()` — constraint blocks, `inside`, `dist` (solved, never dropped), `soft`, pre/post_randomize, seed-stable |
 
-## Licence
+Two VIPs run at 100% functional coverage; the platform's own evidence pipeline
+and untrusted-input boundary have been red-teamed with **executed** attacks
+(`docs/RED_TEAM_PLATFORM.md`). `docs/FEATURE_STATUS.md` is the authoritative
+capability record, with the measurement behind every claim and a ledger of the
+34 defects found and fixed during bring-up.
 
-Apache-2.0. Third-party components and their licences are listed in
-`THIRD_PARTY_NOTICES.md`. No third-party source is vendored into this
+## License
+
+MIT — see [`LICENSE`](LICENSE). Third-party components and their licenses are
+listed in `THIRD_PARTY_NOTICES.md`; no third-party source is vendored into this
 repository.

@@ -28,7 +28,7 @@ user. Versions are the ones this platform was developed and measured against.
 
 - Verilator and GTKWave are invoked as **separate processes**. This project
   neither links against nor redistributes them, so their GPL/LGPL terms do not
-  propagate to this Apache-2.0 codebase. Anyone redistributing a bundle that
+  propagate to this MIT-licensed codebase. Anyone redistributing a bundle that
   *includes* those binaries must comply with their licences directly.
 - Accellera UVM is Apache-2.0 and is fetched by the user; it is not vendored.
 - slang and Z3 are MIT and are consumed as Python wheels.

@@ -8,7 +8,7 @@ version = "0.3.0"
 description = "UVM Verification Studio — SystemVerilog/UVM verification platform (frontend, simulation, coverage, regression, reproducibility)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 authors = [{ name = "Avik Majumdar" }]
 keywords = ["systemverilog", "uvm", "eda", "verification", "simulation", "coverage"]
 
