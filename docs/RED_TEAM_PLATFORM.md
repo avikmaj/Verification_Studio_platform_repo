@@ -90,20 +90,35 @@ study of the O-RAN scale.
    checker loop remains partially self-referential (its RT-002). The
    platform *inherits* those bounds; 13/13 must not be quoted as new DUT
    verification.
-2. **SVA differential coverage is thin**: two designs (pass-silence and
-   fail-firing agreement with Verilator `--assert`) over the supported
-   subset. Sampling approximates Observed-region values; blocking-assign
-   drives at the sampling edge can race, as documented in `engine/sva.py`.
-3. **The native engine is an interpreter**: no classes, UVM, covergroups,
-   or randomize; performance unmeasured and expected orders slower than
-   compiled Verilator. It is a correct-subset simulator, not a Verilator
-   replacement today.
-4. **19 of the 99 platform tests skip without the toolchain** (Verilator +
+2. ~~SVA differential coverage is thin~~ **NARROWED 2026-08-22**: the
+   differential suite is now 10 cases with exact failure-count agreement
+   (|=>, disable iff killing in-flight attempts, ##N chains, $rose/$stable/
+   $past, pipelined attempts, cover pass-actions), and it caught defect 34
+   plus two measured Verilator deviations (attempt merging; dropped cover
+   pass-actions), both pinned from both sides. What REMAINS bounded:
+   sampling approximates Observed-region values, and blocking-assign drives
+   at the sampling edge can race, as documented in `engine/sva.py`.
+3. ~~Performance unmeasured~~ **RETIRED 2026-08-22, measured** by
+   `scripts/perf_baseline.py` with outputs cross-checked between engines:
+   RTL 962 cyc/s native vs 2.86 M cyc/s Verilator (~3000× slower, offset
+   only by zero build time); randomize() 78/s vs 86/s — parity, solving
+   dominates both. The engine now HAS classes, SVA, and z3 randomize
+   (N2–N4, all EXPERIMENTAL); still no UVM or covergroups, still not a
+   Verilator replacement for RTL throughput — that part of the bound
+   stands, now with numbers instead of adjectives.
+4. **19 of the platform tests skip without the toolchain** (Verilator +
    UVM_HOME). A bare CI runner silently exercises less of the suite;
    treat green CI without the toolchain image as partial.
-5. **The remote 4/4 covers the golden project only** — `oran_ecpri` is not
-   seeded into the cloud workspace image (Dockerfile copies `golden_apb`
-   alone).
+   (`tests/unit/_toolchain.py` now prevents a stale system Verilator from
+   silently shadowing 5.050 — skips remain named, never counted as pass.)
+5. ~~The remote 4/4 covers the golden project only~~ **RETIRED
+   2026-08-22**: the workspace image seeds `oran_ecpri` alongside
+   `golden_apb` (commit 3615211, Railway deployment 2afcfce4), and remote
+   job `074b90324947` ran the eCPRI L1 regression on the live free-tier
+   container: **4/4 PASS** (ecpri_smoke + 3× ecpri_random, server-assigned
+   random seeds, each with UVM summary + 0 errors + $finish). Two projects
+   now exercised remotely; "any project" remains unproven — one-yaml
+   onboarding of further suites is the standing path.
 6. **No DAST ran on the API** (no HawkScan credentials in this
    environment); its security posture rests solely on the documented
    trusted-deployment stance in DEPLOYMENT.md.
