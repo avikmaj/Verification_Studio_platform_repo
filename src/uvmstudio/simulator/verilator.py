@@ -42,6 +42,7 @@ _UVM_COUNT_RE = re.compile(r"^\s*(UVM_(?:INFO|WARNING|ERROR|FATAL))\s*:\s*(\d+)\
 # Inline UVM messages, e.g. "UVM_ERROR tb.sv(42) @ 100: uvm_test_top [TAG] msg"
 _UVM_MSG_RE = re.compile(r"^(UVM_(?:ERROR|FATAL))\b\s*(.*)$", re.M)
 _UVM_SUMMARY_RE = re.compile(r"--- UVM Report Summary ---")
+_UVM_SUMMARY_MARKER_RE = re.compile(r"--- UVM Report Summary ---")
 _ASSERT_FAIL_RE = re.compile(
     r"(%Error:.*[Aa]ssert(?:ion)? failed|Assertion failed|\[%Error\].*assert)", re.M
 )
@@ -540,13 +541,27 @@ class VerilatorSimulator(Simulator):
         reasons: list[str] = []
         counters: dict[str, int] = {}
 
+        # Beat-the-classifier RT-P-007: counter parsing was last-write-wins, so
+        # a testbench printing a second forged "UVM_ERROR :    0" line AFTER a
+        # real "UVM_ERROR :    5" summary flipped the verdict to PASS. Take the
+        # MAX across all occurrences: a forged line can only make the run look
+        # WORSE (fail-safe), never cleaner. A duplicated summary is itself
+        # suspicious and recorded.
+        summary_hits = 0
         for m in _UVM_COUNT_RE.finditer(text):
-            counters[m.group(1)] = int(m.group(2))
+            k, v = m.group(1), int(m.group(2))
+            counters[k] = max(counters.get(k, 0), v)
+        summary_hits = len(_UVM_SUMMARY_MARKER_RE.findall(text))
 
         uvm_ran = bool(_UVM_SUMMARY_RE.search(text))
         n_err = counters.get("UVM_ERROR", 0)
         n_fatal = counters.get("UVM_FATAL", 0)
-        inline_fatal = [m.group(0)[:200] for m in _UVM_MSG_RE.finditer(text)]
+        # An inline UVM message is `UVM_ERROR tb.sv(42) @ 100: ...`; the summary
+        # counter line `UVM_ERROR :    0` also matches _UVM_MSG_RE but is NOT an
+        # inline message — exclude the counter form so a clean summary is not
+        # mistaken for its own inline errors.
+        inline_fatal = [m.group(0)[:200] for m in _UVM_MSG_RE.finditer(text)
+                        if not _UVM_COUNT_RE.match(m.group(0))]
         vl_errors = [m.group(2)[:200] for m in _VERILATOR_ERROR_RE.finditer(text)]
         assert_fail = bool(_ASSERT_FAIL_RE.search(text))
         finished = bool(_FINISH_RE.search(text))
@@ -570,8 +585,24 @@ class VerilatorSimulator(Simulator):
             reasons.append(f"UVM_FATAL count = {n_fatal}")
         if n_err:
             reasons.append(f"UVM_ERROR count = {n_err}")
-        if not uvm_ran and inline_fatal:
+        # Beat-the-classifier RT-P-008: inline UVM_ERROR/UVM_FATAL messages
+        # were ignored whenever a summary was present, so real inline errors +
+        # a forged "UVM_ERROR : 0" summary passed. A genuine UVM run keeps the
+        # two consistent; a contradiction (inline errors, zero in the summary)
+        # is now a failure, not a pass.
+        if inline_fatal and uvm_ran and not n_err and not n_fatal:
+            reasons.append(
+                f"{len(inline_fatal)} inline UVM_ERROR/UVM_FATAL message(s) "
+                f"contradict a summary reporting zero — evidence tampering "
+                f"or a broken report")
+        elif inline_fatal and not uvm_ran:
             reasons.append(f"{len(inline_fatal)} inline UVM_ERROR/UVM_FATAL message(s)")
+        # A UVM report summary printed more than once cannot come from one
+        # orderly run — refuse to treat either as authoritative.
+        if summary_hits > 1:
+            reasons.append(
+                f"UVM report summary appears {summary_hits} times — a single "
+                f"run prints it once; evidence is not trustworthy")
         if vl_errors:
             reasons.append(f"simulator reported {len(vl_errors)} %Error(s)")
         if assert_fail:

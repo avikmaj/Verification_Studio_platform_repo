@@ -152,6 +152,18 @@ Split default is 16 (48 in low-memory mode); override with
 End to end through the CLI: `uvmstudio build` **305.8 s**, `STATUS: PASS`,
 then `regress --tier L2` → **6/6 PASS**.
 
+**Behavioral parity — proven, not assumed (`scripts/lowmem_parity.py`,
+2026-08-22).** The concern with `-O0` + stub PCH + a 91-TU split is whether
+it changes *behavior*, not just build cost. It does not: golden_apb run at a
+fixed seed under both modes produced **identical verdicts and identical UVM
+report digests at every test/seed** — `apb_smoke@12345`, `apb_random@12345/
+12346/12347` all 4/4 PASS with byte-matching report digests (`91a02aa0…`,
+`47dc435c…`, `c3be50be…`, `48eb9e4b…`) across standard and low-memory
+builds. Same seed → same stimulus and checking, independent of optimization
+level. (Coverage totals are not surfaced in golden_apb's regression summary,
+so the digest match — which includes UVM_ERROR/UVM_INFO counts and test-done
+lines — is the parity evidence; the script diffs coverage too when present.)
+
 ### Covergroups in UVM: the idiom that does not work
 
 The standard `uvm_subscriber` coverage pattern —

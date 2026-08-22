@@ -37,6 +37,35 @@ trap the O-RAN red-team named RT-006. Fixed with explicit per-encoding bins;
 the model now records **66/66 bins including all 48 cross bins**, re-run
 clean at 100.00%, 6/6 PASS. Logged as defect 28.
 
+### RT-P-007 — Forged counter line flips FAIL to PASS: **FOUND → FIXED**
+The counter parse was last-write-wins, so a testbench printing a second
+`UVM_ERROR :    0` line *after* a real `UVM_ERROR :    5` summary classified
+**PASS** despite five real errors. Fixed: counters take the **max** across
+all occurrences — a forged line can only make a run look worse (fail-safe),
+never cleaner. A summary printed more than once is itself refused. Pinned by
+`test_classifier_redteam.py`.
+
+### RT-P-008 — Inline errors hidden behind a clean summary: **FOUND → FIXED**
+Real inline `UVM_ERROR tb.sv(42) @ 100: …` messages plus a forged
+`UVM_ERROR : 0` summary passed, because inline messages were ignored whenever
+a summary was present. A genuine UVM run keeps inline and summary consistent;
+the contradiction is now a failure. (Care taken that the summary's own
+`UVM_ERROR : 0` counter line is not miscounted as an inline error — the legit
+clean run still passes.)
+
+### Beat-the-classifier — the honest limit (C3/C4): STATED, not fixed
+A testbench that actually runs, does **no checking**, prints a genuinely
+clean UVM report and calls `$finish` will classify PASS — and should, from
+the log's point of view: the text is honest about what executed; it cannot
+reveal that nothing was *checked*. Forging the `$finish` line itself via
+`$display` is the same class. This is not a classifier-defensible property
+from log text alone; it is defended one layer up by the VIP-level
+anti-vacuity guards (scoreboard transaction counts, coverage, the
+`m_checks`/`m_errors_seen` guard of defect 17). The classifier's job — not
+being fooled by text that contradicts itself — is now hardened (RT-P-007/008);
+the deeper "did the TB check anything" question stays a VIP-signoff
+responsibility, stated here so it is not mistaken for a classifier guarantee.
+
 ### RT-P-004 — SVA semantics and reproducibility: DEFENDED
 - Overlapping attempts (req at T and T+1, only the first granted): the
   engine tracked both independently — 1 pass AND 1 fail, not a merged
