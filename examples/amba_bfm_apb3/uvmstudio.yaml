@@ -1,0 +1,62 @@
+# One-yaml onboarding of the AMBA BFM Suite (APB3 protocol) into the platform.
+#
+# STATUS: TEMPLATE, NOT_VERIFIED. Authored from the suite's Integration Guide
+# and Functional Design (directory layout in FUNCTIONAL_DESIGN.md §3, filelist
+# in INTEGRATION_GUIDE.md §6). It has NOT been run here because the suite
+# source is not in this workspace — drop this file at the amba_bfm_suite root
+# (so the relative paths resolve) and run it to turn NOT_VERIFIED into PASS.
+#
+# The suite is pure SystemVerilog (no UVM), reporting via amba_bfm_reporter
+# which emits [TEST_PASS]/[TEST_FAIL]. The platform classifier now honors those
+# tokens (a [TEST_FAIL] that still $finishes is FAIL, not PASS) — so this
+# project needs NO UVM home and default_backend: verilator with no uvm_* keys.
+#
+# To cover another protocol, copy this file and substitute the prefix
+# (apb3 -> ahb5 / axi4 / ace5 / chi / ...); every protocol follows the same
+# file pattern per the Integration Guide.
+
+name: amba_bfm_apb3
+top: tb_top
+language_standard: "1800-2017"
+timescale: "1ns/1ps"
+default_backend: verilator
+
+# Pure-SV suite: no uvm_home / uvm_version on purpose.
+coverage: true
+waves: on_fail
+
+filesets:
+  - name: common
+    include_dirs: [common]
+    files:
+      - common/amba_bfm_types.sv
+      - common/amba_bfm_utils.sv
+      - common/amba_bfm_mem_model.sv
+      - common/amba_bfm_reporter.sv
+      - common/amba_bfm_pkg.sv
+  - name: apb3
+    include_dirs: [bfm/apb3, tb/common]
+    files:
+      - bfm/apb3/apb3_if.sv
+      - bfm/apb3/apb3_checker.sv
+      - bfm/apb3/apb3_bfm_pkg.sv
+      - tb/per_protocol/apb3_test_pkg.sv
+      - tb/per_protocol/apb3_tb_top.sv
+
+# Tiers mirror the suite's own L1/L2/L3 (smoke / directed+negative / random).
+# Test names follow the suite's dv_runner_bfm convention; adjust to the exact
+# test-class names in apb3_test_pkg.sv if they differ.
+tests:
+  - name: apb3_smoke
+    tier: L1
+    seeds: 1
+  - name: apb3_directed
+    tier: L2
+    seeds: 1
+  - name: apb3_slverr
+    tier: L2
+    seeds: 1
+    expect: FAIL          # negative test: PSLVERR violation must be DETECTED
+  - name: apb3_random
+    tier: L3
+    seeds: 10

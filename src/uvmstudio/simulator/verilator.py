@@ -49,6 +49,12 @@ _ASSERT_FAIL_RE = re.compile(
 _VERILATOR_ERROR_RE = re.compile(r"^%Error(-[A-Z0-9_]+)?:\s*(.*)$", re.M)
 _VERILATOR_WARN_RE = re.compile(r"^%Warning(-[A-Z0-9_]+)?:\s*(.*)$", re.M)
 _FINISH_RE = re.compile(r"- (?:\S+:\d+: )?Verilog \$finish|\$finish called|- V e r i l a t i o n")
+# Explicit pass/fail tokens from a non-UVM reporter (e.g. the AMBA BFM suite's
+# amba_bfm_reporter emits [TEST_PASS]/[TEST_FAIL]). A pure-SV run that prints
+# [TEST_FAIL] and then $finishes cleanly must NOT be classified PASS by the
+# $finish+rc0 path — the reporter's own verdict is authoritative for it.
+_TOKEN_FAIL_RE = re.compile(r"\[TEST_FAIL\]|\bTEST FAILED\b", re.M)
+_TOKEN_PASS_RE = re.compile(r"\[TEST_PASS\]|\bTEST PASSED\b", re.M)
 _TIMEOUT_TOKENS = ("UVM_FATAL", "TIMEOUT", "watchdog")
 
 # --- build failure signatures --------------------------------------------
@@ -565,6 +571,8 @@ class VerilatorSimulator(Simulator):
         vl_errors = [m.group(2)[:200] for m in _VERILATOR_ERROR_RE.finditer(text)]
         assert_fail = bool(_ASSERT_FAIL_RE.search(text))
         finished = bool(_FINISH_RE.search(text))
+        token_fail = bool(_TOKEN_FAIL_RE.search(text))
+        token_pass = bool(_TOKEN_PASS_RE.search(text))
 
         counters["verilator_errors"] = len(vl_errors)
 
@@ -609,6 +617,11 @@ class VerilatorSimulator(Simulator):
             reasons.append("assertion failure observed")
         if returncode != 0:
             reasons.append(f"non-zero exit code {returncode}")
+        # A non-UVM reporter's explicit failure verdict is authoritative
+        # (onboarding the AMBA BFM suite): [TEST_FAIL] means FAIL even if the
+        # run also $finished with exit 0.
+        if token_fail:
+            reasons.append("explicit [TEST_FAIL] token from the testbench reporter")
 
         failed = bool(reasons)
 
@@ -669,6 +682,19 @@ class VerilatorSimulator(Simulator):
                 reasons=["UVM summary is clean but $finish was never "
                          "observed - the run did not complete in an orderly "
                          "way, so the summary proves nothing (RT-P-002)"],
+                counters=counters,
+            )
+        # Non-UVM reporter PASS: an explicit [TEST_PASS] token plus orderly
+        # completion. Stronger evidence than a bare $finish because the
+        # testbench asserted its own verdict (token_fail was already handled
+        # as a failure above).
+        if token_pass and finished and returncode == 0:
+            return RunResult(
+                status=RunStatus.PASS,
+                seed=request.seed,
+                returncode=returncode,
+                duration_s=0.0,
+                reasons=["[TEST_PASS] reporter token and $finish with exit 0"],
                 counters=counters,
             )
         if finished and returncode == 0:

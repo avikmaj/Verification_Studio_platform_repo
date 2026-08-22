@@ -70,3 +70,25 @@ def test_summary_without_finish_still_not_verified():
     # RT-P-002 regression stays intact under the new parsing
     no_finish = "\n--- UVM Report Summary ---\nUVM_ERROR :    0\nUVM_FATAL :    0\n"
     assert _classify(no_finish) is RunStatus.NOT_VERIFIED
+
+
+# ---------------------------------------------------------------------------
+# Non-UVM reporter tokens (AMBA BFM suite onboarding): [TEST_PASS]/[TEST_FAIL]
+# ---------------------------------------------------------------------------
+
+def test_bfm_fail_token_beats_clean_finish():
+    # the suite prints [TEST_FAIL] and then $finishes cleanly — must be FAIL,
+    # not PASS via the $finish+rc0 path
+    log = "[TEST_FAIL] 3 scoreboard errors\n- tb.sv:1: Verilog $finish\n"
+    assert _classify(log) is RunStatus.FAIL
+
+
+def test_bfm_pass_token_is_accepted():
+    log = "[TEST_PASS] all checks ok\n- tb.sv:1: Verilog $finish\n"
+    assert _classify(log) is RunStatus.PASS
+
+
+def test_bare_finish_without_token_still_passes():
+    # a plain non-UVM run that just $finishes is still PASS (unchanged) — the
+    # token path only adds a stronger signal, it does not remove the old one
+    assert _classify("- tb.sv:1: Verilog $finish\n") is RunStatus.PASS
